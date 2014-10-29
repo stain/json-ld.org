@@ -1,97 +1,71 @@
-/**
- * Styling for the JSON-LD playground UI.
- */
-textarea:focus, input:focus {
-  border: 2px solid #900;
+.jumbotron { text-align: center; }
+
+#frame-div{ display: none; }
+#tabs{ margin-bottom: 0; }
+.nav-tabs > li.active > a,
+.nav-tabs > li.active > a:hover{
+  background-color: #fff;
 }
 
-textarea {
-  display: inline;
-  margin-top: 10px;
-  margin-bottom: 10px;
-  width:99% !important;
-  min-height:200px !important;
-}
 
-textarea.compressed {
-  display: inline;
-  margin-top: 10px;
-  margin-bottom: 10px;
-  width:49% !important;
-  min-height:200px !important;
-}
-
-.clear { /* generic container (i.e. div) for floating buttons */
-  overflow: hidden;
+.btn.resizer{
+  cursor: row-resize;
+  padding: .5px;
   width: 100%;
-}
-
-.input-header {
-  overflow: hidden;
-  width: 100%;
-  padding-top: 10px;
-}
-
-.input-header .left {
-  display: inline-block;
-}
-
-.input-header .right {
-  display: inline-block;
-  float: right;
-  width: 49% !important;
-}
-
-.errors {
-  font-style: bold;
-  color: red;
-}
-
-li.button-list {
-  display: inline-block;
-  margin-right: 6px;
-}
-
-li.button {
-  background: transparent url('images/bg_button.gif') no-repeat scroll top right;
-  color: #444;
-  display: inline-block;
-  font: normal 12px arial, sans-serif;
-  height: 24px;
-  margin-right: 6px;
-  padding-right: 18px; /* sliding doors padding */
-  text-decoration: none;
-  cursor: pointer;
-}
-
-li.button span {
-  background: transparent url('images/bg_button_span.gif') no-repeat;
   display: block;
-  line-height: 14px;
-  padding: 5px 0 5px 18px;
 }
 
-li.button:active {
-  background-position: bottom right;
-  color: #000;
-  outline: none; /* hide dotted outline in Firefox */
+.popover .label{
+  font-family: monospace;
+  margin: 1px;
+  padding: 5px;
 }
 
-li.button:active span {
-  background-position: bottom left;
-  padding: 6px 0 4px 18px; /* push text down 1px */
+/*
+  auto-resize bootstrap popovers from
+  http://stackoverflow.com/questions/15776487/bootstrap-popover-width-for-popover-inner
+ */
+.popover {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1010;
+  display: none;
+  max-width: 600px;
+  padding: 1px;
+  text-align: left;
+  white-space: normal;
+  background-color: #ffffff;
+  border: 1px solid #ccc;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  -webkit-border-radius: 6px;
+     -moz-border-radius: 6px;
+          border-radius: 6px;
+  -webkit-box-shadow: 0 5px 10px rgba(0, 0, 0, 0.2);
+     -moz-box-shadow: 0 5px 10px rgba(0, 0, 0, 0.2);
+          box-shadow: 0 5px 10px rgba(0, 0, 0, 0.2);
+  -webkit-background-clip: padding-box;
+     -moz-background-clip: padding;
+          background-clip: padding-box;
 }
 
-#permalink {
-  text-align: right;
+.editor-options > * {
+  margin-top: 10px;
 }
 
-
-/* Overrides for standard prettify.css */
-
-.prettyprint {
-  font-size: 0.8em;
-  overflow: auto;
+#page-playground .editor-option {
+  margin-bottom: 0;
 }
 
-#frame {display: none;}
+#page-playground .editor-option .btn {
+  padding: 1px 5px 0px 5px;
+}
+
+#page-playground .read-only {
+  opacity: .6;
+}
+
+#copy-context {
+  padding: 0px 4px;
+  float: left;
+}

@@ -4,7 +4,7 @@
  * @author Dave Longley
  *
  * BSD 3-Clause License
- * Copyright (c) 2011-2013 Digital Bazaar, Inc.
+ * Copyright (c) 2011-2014 Digital Bazaar, Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,18 +36,17 @@
 (function() {
 
 // determine if in-browser or using node.js
-var _nodejs = (typeof module === 'object' && module.exports);
+var _nodejs = (
+  typeof process !== 'undefined' && process.versions && process.versions.node);
 var _browser = !_nodejs &&
   (typeof window !== 'undefined' || typeof self !== 'undefined');
 if(_browser) {
   if(typeof global === 'undefined') {
     if(typeof window !== 'undefined') {
       global = window;
-    }
-    else if(typeof self !== 'undefined') {
+    } else if(typeof self !== 'undefined') {
       global = self;
-    }
-    else if(typeof $ !== 'undefined') {
+    } else if(typeof $ !== 'undefined') {
       global = $;
     }
   }
@@ -65,13 +64,13 @@ var wrapper = function(jsonld) {
  * @param ctx the context to compact with.
  * @param [options] options to use:
  *          [base] the base IRI to use.
- *          [strict] use strict mode (default: true).
  *          [compactArrays] true to compact arrays to single values when
  *            appropriate, false not to (default: true).
  *          [graph] true to always output a top-level graph (default: false).
+ *          [expandContext] a context to expand with.
  *          [skipExpansion] true to assume the input is expanded and skip
  *            expansion, false not to, defaults to false.
- *          [loadContext(url, callback(err, url, result))] the context loader.
+ *          [documentLoader(url, callback(err, remoteDoc))] the document loader.
  * @param callback(err, compacted, ctx) called once the operation completes.
  */
 jsonld.compact = function(input, ctx, options, callback) {
@@ -91,8 +90,8 @@ jsonld.compact = function(input, ctx, options, callback) {
   if(ctx === null) {
     return jsonld.nextTick(function() {
       callback(new JsonLdError(
-      'The compaction context must not be null.',
-      'jsonld.CompactError'));
+        'The compaction context must not be null.',
+        'jsonld.CompactError', {code: 'invalid local context'}));
     });
   }
 
@@ -105,10 +104,7 @@ jsonld.compact = function(input, ctx, options, callback) {
 
   // set default options
   if(!('base' in options)) {
-    options.base = '';
-  }
-  if(!('strict' in options)) {
-    options.strict = true;
+    options.base = (typeof input === 'string') ? input : '';
   }
   if(!('compactArrays' in options)) {
     options.compactArrays = true;
@@ -119,8 +115,8 @@ jsonld.compact = function(input, ctx, options, callback) {
   if(!('skipExpansion' in options)) {
     options.skipExpansion = false;
   }
-  if(!('loadContext' in options)) {
-    options.loadContext = jsonld.loadContext;
+  if(!('documentLoader' in options)) {
+    options.documentLoader = jsonld.loadDocument;
   }
 
   var expand = function(input, options, callback) {
@@ -149,15 +145,15 @@ jsonld.compact = function(input, ctx, options, callback) {
           'jsonld.CompactError', {cause: err}));
       }
 
+      var compacted;
       try {
         // do compaction
-        var compacted = new Processor().compact(
-          activeCtx, null, expanded, options);
-        cleanup(null, compacted, activeCtx, options);
+        compacted = new Processor().compact(activeCtx, null, expanded, options);
+      } catch(ex) {
+        return callback(ex);
       }
-      catch(ex) {
-        callback(ex);
-      }
+
+      cleanup(null, compacted, activeCtx, options);
     });
   });
 
@@ -168,17 +164,15 @@ jsonld.compact = function(input, ctx, options, callback) {
     }
 
     if(options.compactArrays && !options.graph && _isArray(compacted)) {
-      // simplify to a single item
       if(compacted.length === 1) {
+        // simplify to a single item
         compacted = compacted[0];
-      }
-      // simplify to an empty object
-      else if(compacted.length === 0) {
+      } else if(compacted.length === 0) {
+        // simplify to an empty object
         compacted = {};
       }
-    }
-    // always use array if graph option is on
-    else if(options.graph && _isObject(compacted)) {
+    } else if(options.graph && _isObject(compacted)) {
+      // always use array if graph option is on
       compacted = [compacted];
     }
 
@@ -195,7 +189,7 @@ jsonld.compact = function(input, ctx, options, callback) {
     // remove empty contexts
     var tmp = ctx;
     ctx = [];
-    for(var i in tmp) {
+    for(var i = 0; i < tmp.length; ++i) {
       if(!_isObject(tmp[i]) || Object.keys(tmp[i]).length > 0) {
         ctx.push(tmp[i]);
       }
@@ -217,8 +211,7 @@ jsonld.compact = function(input, ctx, options, callback) {
         compacted['@context'] = ctx;
       }
       compacted[kwgraph] = graph;
-    }
-    else if(_isObject(compacted) && hasContext) {
+    } else if(_isObject(compacted) && hasContext) {
       // reorder keys so @context is first
       var graph = compacted;
       compacted = {'@context': ctx};
@@ -237,9 +230,10 @@ jsonld.compact = function(input, ctx, options, callback) {
  * @param input the JSON-LD input to expand.
  * @param [options] the options to use:
  *          [base] the base IRI to use.
+ *          [expandContext] a context to expand with.
  *          [keepFreeFloatingNodes] true to keep free-floating nodes,
  *            false not to, defaults to false.
- *          [loadContext(url, callback(err, url, result))] the context loader.
+ *          [documentLoader(url, callback(err, remoteDoc))] the document loader.
  * @param callback(err, expanded) called once the operation completes.
  */
 jsonld.expand = function(input, options, callback) {
@@ -257,35 +251,101 @@ jsonld.expand = function(input, options, callback) {
   options = options || {};
 
   // set default options
-  if(!('base' in options)) {
-    options.base = '';
-  }
-  if(!('loadContext' in options)) {
-    options.loadContext = jsonld.loadContext;
+  if(!('documentLoader' in options)) {
+    options.documentLoader = jsonld.loadDocument;
   }
   if(!('keepFreeFloatingNodes' in options)) {
     options.keepFreeFloatingNodes = false;
   }
 
   jsonld.nextTick(function() {
-    // retrieve all @context URLs in the input
-    input = _clone(input);
+    // if input is a string, attempt to dereference remote document
+    if(typeof input === 'string') {
+      var done = function(err, remoteDoc) {
+        if(err) {
+          return callback(err);
+        }
+        try {
+          if(!remoteDoc.document) {
+            throw new JsonLdError(
+              'No remote document found at the given URL.',
+              'jsonld.NullRemoteDocument');
+          }
+          if(typeof remoteDoc.document === 'string') {
+            remoteDoc.document = JSON.parse(remoteDoc.document);
+          }
+        } catch(ex) {
+          return callback(new JsonLdError(
+            'Could not retrieve a JSON-LD document from the URL. URL ' +
+            'dereferencing not implemented.', 'jsonld.LoadDocumentError', {
+              code: 'loading document failed',
+              cause: ex,
+              remoteDoc: remoteDoc
+          }));
+        }
+        expand(remoteDoc);
+      };
+      var promise = options.documentLoader(input, done);
+      if(promise && 'then' in promise) {
+        promise.then(done.bind(null, null), done);
+      }
+      return;
+    }
+    // nothing to load
+    expand({contextUrl: null, documentUrl: null, document: input});
+  });
+
+  function expand(remoteDoc) {
+    // set default base
+    if(!('base' in options)) {
+      options.base = remoteDoc.documentUrl || '';
+    }
+    // build meta-object and retrieve all @context URLs
+    var input = {
+      document: _clone(remoteDoc.document),
+      remoteContext: {'@context': remoteDoc.contextUrl}
+    };
+    if('expandContext' in options) {
+      var expandContext = _clone(options.expandContext);
+      if(typeof expandContext === 'object' && '@context' in expandContext) {
+        input.expandContext = expandContext;
+      } else {
+        input.expandContext = {'@context': expandContext};
+      }
+    }
     _retrieveContextUrls(input, options, function(err, input) {
       if(err) {
         return callback(err);
       }
+
+      var expanded;
       try {
-        // do expansion
+        var processor = new Processor();
         var activeCtx = _getInitialContext(options);
-        var expanded = new Processor().expand(
-          activeCtx, null, input, options, false);
+        var document = input.document;
+        var remoteContext = input.remoteContext['@context'];
+
+        // process optional expandContext
+        if(input.expandContext) {
+          activeCtx = processor.processContext(
+            activeCtx, input.expandContext['@context'], options);
+        }
+
+        // process remote context from HTTP Link Header
+        if(remoteContext) {
+          activeCtx = processor.processContext(
+            activeCtx, remoteContext, options);
+        }
+
+        // expand document
+        expanded = processor.expand(
+          activeCtx, null, document, options, false);
 
         // optimize away @graph with no other properties
         if(_isObject(expanded) && ('@graph' in expanded) &&
           Object.keys(expanded).length === 1) {
           expanded = expanded['@graph'];
-        }
-        else if(expanded === null) {
+        } else if(expanded === null) {
           expanded = [];
         }
 
@@ -293,13 +353,12 @@ jsonld.expand = function(input, options, callback) {
         if(!_isArray(expanded)) {
           expanded = [expanded];
         }
-        callback(null, expanded);
+      } catch(ex) {
+        return callback(ex);
       }
-      catch(ex) {
-        callback(ex);
-      }
+      callback(null, expanded);
     });
-  });
+  }
 };
 
 /**
@@ -309,7 +368,8 @@ jsonld.expand = function(input, options, callback) {
  * @param ctx the context to use to compact the flattened output, or null.
  * @param [options] the options to use:
  *          [base] the base IRI to use.
- *          [loadContext(url, callback(err, url, result))] the context loader.
+ *          [expandContext] a context to expand with.
+ *          [documentLoader(url, callback(err, remoteDoc))] the document loader.
  * @param callback(err, flattened) called once the operation completes.
  */
 jsonld.flatten = function(input, ctx, options, callback) {
@@ -323,15 +383,19 @@ jsonld.flatten = function(input, ctx, options, callback) {
   if(typeof options === 'function') {
     callback = options;
     options = {};
+  } else if(typeof ctx === 'function') {
+    callback = ctx;
+    ctx = null;
+    options = {};
   }
   options = options || {};
 
   // set default options
   if(!('base' in options)) {
-    options.base = '';
+    options.base = (typeof input === 'string') ? input : '';
   }
-  if(!('loadContext' in options)) {
-    options.loadContext = jsonld.loadContext;
+  if(!('documentLoader' in options)) {
+    options.documentLoader = jsonld.loadDocument;
   }
 
   // expand input
@@ -342,11 +406,11 @@ jsonld.flatten = function(input, ctx, options, callback) {
         'jsonld.FlattenError', {cause: err}));
     }
 
+    var flattened;
     try {
       // do flattening
-      var flattened = new Processor().flatten(_input);
-    }
-    catch(ex) {
+      flattened = new Processor().flatten(_input);
+    } catch(ex) {
       return callback(ex);
     }
 
@@ -375,10 +439,12 @@ jsonld.flatten = function(input, ctx, options, callback) {
  * @param frame the JSON-LD frame to use.
  * @param [options] the framing options.
  *          [base] the base IRI to use.
+ *          [expandContext] a context to expand with.
  *          [embed] default @embed flag (default: true).
  *          [explicit] default @explicit flag (default: false).
+ *          [requireAll] default @requireAll flag (default: true).
  *          [omitDefault] default @omitDefault flag (default: false).
- *          [loadContext(url, callback(err, url, result))] the context loader.
+ *          [documentLoader(url, callback(err, remoteDoc))] the document loader.
  * @param callback(err, framed) called once the operation completes.
  */
 jsonld.frame = function(input, frame, options, callback) {
@@ -397,63 +463,124 @@ jsonld.frame = function(input, frame, options, callback) {
 
   // set default options
   if(!('base' in options)) {
-    options.base = '';
+    options.base = (typeof input === 'string') ? input : '';
   }
-  if(!('loadContext' in options)) {
-    options.loadContext = jsonld.loadContext;
+  if(!('documentLoader' in options)) {
+    options.documentLoader = jsonld.loadDocument;
   }
   if(!('embed' in options)) {
     options.embed = true;
   }
   options.explicit = options.explicit || false;
+  if(!('requireAll' in options)) {
+    options.requireAll = true;
+  }
   options.omitDefault = options.omitDefault || false;
 
-  // preserve frame context
-  var ctx = frame['@context'] || {};
+  jsonld.nextTick(function() {
+    // if frame is a string, attempt to dereference remote document
+    if(typeof frame === 'string') {
+      var done = function(err, remoteDoc) {
+        if(err) {
+          return callback(err);
+        }
+        try {
+          if(!remoteDoc.document) {
+            throw new JsonLdError(
+              'No remote document found at the given URL.',
+              'jsonld.NullRemoteDocument');
+          }
+          if(typeof remoteDoc.document === 'string') {
+            remoteDoc.document = JSON.parse(remoteDoc.document);
+          }
+        } catch(ex) {
+          return callback(new JsonLdError(
+            'Could not retrieve a JSON-LD document from the URL. URL ' +
+            'dereferencing not implemented.', 'jsonld.LoadDocumentError', {
+              code: 'loading document failed',
+              cause: ex,
+              remoteDoc: remoteDoc
+          }));
+        }
+        doFrame(remoteDoc);
+      };
+      var promise = options.documentLoader(frame, done);
+      if(promise && 'then' in promise) {
+        promise.then(done.bind(null, null), done);
+      }
+      return;
+    }
+    // nothing to load
+    doFrame({contextUrl: null, documentUrl: null, document: frame});
+  });
 
-  // expand input
-  jsonld.expand(input, options, function(err, expanded) {
-    if(err) {
-      return callback(new JsonLdError(
-        'Could not expand input before framing.',
-        'jsonld.FrameError', {cause: err}));
+  function doFrame(remoteFrame) {
+    // preserve frame context and add any Link header context
+    var frame = remoteFrame.document;
+    var ctx;
+    if(frame) {
+      ctx = frame['@context'];
+      if(remoteFrame.contextUrl) {
+        if(!ctx) {
+          ctx = remoteFrame.contextUrl;
+        } else if(_isArray(ctx)) {
+          ctx.push(remoteFrame.contextUrl);
+        } else {
+          ctx = [ctx, remoteFrame.contextUrl];
+        }
+        frame['@context'] = ctx;
+      } else {
+        ctx = ctx || {};
+      }
+    } else {
+      ctx = {};
     }
 
-    // expand frame
-    var opts = _clone(options);
-    opts.keepFreeFloatingNodes = true;
-    jsonld.expand(frame, opts, function(err, expandedFrame) {
+    // expand input
+    jsonld.expand(input, options, function(err, expanded) {
       if(err) {
         return callback(new JsonLdError(
-          'Could not expand frame before framing.',
+          'Could not expand input before framing.',
           'jsonld.FrameError', {cause: err}));
       }
 
-      try {
-        // do framing
-        var framed = new Processor().frame(expanded, expandedFrame, options);
-      }
-      catch(ex) {
-        return callback(ex);
-      }
-
-      // compact result (force @graph option to true, skip expansion)
-      opts.graph = true;
-      opts.skipExpansion = true;
-      jsonld.compact(framed, ctx, opts, function(err, compacted, ctx) {
+      // expand frame
+      var opts = _clone(options);
+      opts.isFrame = true;
+      opts.keepFreeFloatingNodes = true;
+      jsonld.expand(frame, opts, function(err, expandedFrame) {
         if(err) {
           return callback(new JsonLdError(
-            'Could not compact framed output.',
+            'Could not expand frame before framing.',
             'jsonld.FrameError', {cause: err}));
         }
-        // get graph alias
-        var graph = _compactIri(ctx, '@graph');
-        // remove @preserve from results
-        compacted[graph] = _removePreserve(ctx, compacted[graph], opts);
-        callback(null, compacted);
+
+        var framed;
+        try {
+          // do framing
+          framed = new Processor().frame(expanded, expandedFrame, opts);
+        } catch(ex) {
+          return callback(ex);
+        }
+
+        // compact result (force @graph option to true, skip expansion)
+        opts.graph = true;
+        opts.skipExpansion = true;
+        jsonld.compact(framed, ctx, opts, function(err, compacted, ctx) {
+          if(err) {
+            return callback(new JsonLdError(
+              'Could not compact framed output.',
+              'jsonld.FrameError', {cause: err}));
+          }
+          // get graph alias
+          var graph = _compactIri(ctx, '@graph');
+          // remove @preserve from results
+          compacted[graph] = _removePreserve(ctx, compacted[graph], opts);
+          callback(null, compacted);
+        });
       });
     });
-  });
+  }
 };
 
 /**
@@ -463,7 +590,8 @@ jsonld.frame = function(input, frame, options, callback) {
  * @param ctx the JSON-LD context to apply.
  * @param [options] the framing options.
  *          [base] the base IRI to use.
- *          [loadContext(url, callback(err, url, result))] the context loader.
+ *          [expandContext] a context to expand with.
+ *          [documentLoader(url, callback(err, remoteDoc))] the document loader.
  * @param callback(err, objectified) called once the operation completes.
  */
 jsonld.objectify = function(input, ctx, options, callback) {
@@ -476,10 +604,10 @@ jsonld.objectify = function(input, ctx, options, callback) {
 
   // set default options
   if(!('base' in options)) {
-    options.base = '';
+    options.base = (typeof input === 'string') ? input : '';
   }
-  if(!('loadContext' in options)) {
-    options.loadContext = jsonld.loadContext;
+  if(!('documentLoader' in options)) {
+    options.documentLoader = jsonld.loadDocument;
   }
 
   // expand input
@@ -490,11 +618,11 @@ jsonld.objectify = function(input, ctx, options, callback) {
         'jsonld.FrameError', {cause: err}));
     }
 
+    var flattened;
     try {
       // flatten the graph
-      var flattened = new Processor().flatten(_input);
-    }
-    catch(ex) {
+      flattened = new Processor().flatten(_input);
+    } catch(ex) {
       return callback(ex);
     }
 
@@ -541,19 +669,16 @@ jsonld.objectify = function(input, ctx, options, callback) {
           if(_isString(obj) && isid) {
             subject[k] = obj = top[obj];
             recurse(obj);
-          }
-          else if(_isArray(obj)) {
-            for(var i=0; i<obj.length; i++) {
+          } else if(_isArray(obj)) {
+            for(var i = 0; i < obj.length; ++i) {
               if(_isString(obj[i]) && isid) {
                 obj[i] = top[obj[i]];
-              }
-              else if(_isObject(obj[i]) && '@id' in obj[i]) {
+              } else if(_isObject(obj[i]) && '@id' in obj[i]) {
                 obj[i] = top[obj[i]['@id']];
               }
               recurse(obj[i]);
             }
-          }
-          else if(_isObject(obj)) {
+          } else if(_isObject(obj)) {
             var sid = obj['@id'];
             subject[k] = obj = top[sid];
             recurse(obj);
@@ -591,9 +716,10 @@ jsonld.objectify = function(input, ctx, options, callback) {
  * @param input the JSON-LD input to normalize.
  * @param [options] the options to use:
  *          [base] the base IRI to use.
+ *          [expandContext] a context to expand with.
  *          [format] the format if output is a string:
  *            'application/nquads' for N-Quads.
- *          [loadContext(url, callback(err, url, result))] the context loader.
+ *          [documentLoader(url, callback(err, remoteDoc))] the document loader.
  * @param callback(err, normalized) called once the operation completes.
  */
 jsonld.normalize = function(input, options, callback) {
@@ -612,15 +738,16 @@ jsonld.normalize = function(input, options, callback) {
 
   // set default options
   if(!('base' in options)) {
-    options.base = '';
+    options.base = (typeof input === 'string') ? input : '';
   }
-  if(!('loadContext' in options)) {
-    options.loadContext = jsonld.loadContext;
+  if(!('documentLoader' in options)) {
+    options.documentLoader = jsonld.loadDocument;
   }
 
   // convert to RDF dataset then do normalization
   var opts = _clone(options);
   delete opts.format;
+  opts.produceGeneralizedRdf = false;
   jsonld.toRDF(input, opts, function(err, dataset) {
     if(err) {
       return callback(new JsonLdError(
@@ -639,13 +766,13 @@ jsonld.normalize = function(input, options, callback) {
  * @param dataset a serialized string of RDF in a format specified by the
  *          format option or an RDF dataset to convert.
  * @param [options] the options to use:
- *          [format] the format if input is not an array:
+ *          [format] the format if dataset param must first be parsed:
  *            'application/nquads' for N-Quads (default).
+ *          [rdfParser] a custom RDF-parser to use to parse the dataset.
  *          [useRdfType] true to use rdf:type, false to use @type
  *            (default: false).
  *          [useNativeTypes] true to convert XSD types into native types
- *            (boolean, integer, double), false not to (default: true).
- *
+ *            (boolean, integer, double), false not to (default: false).
  * @param callback(err, output) called once the operation completes.
  */
 jsonld.fromRDF = function(dataset, options, callback) {
@@ -667,7 +794,7 @@ jsonld.fromRDF = function(dataset, options, callback) {
     options.useRdfType = false;
   }
   if(!('useNativeTypes' in options)) {
-    options.useNativeTypes = true;
+    options.useNativeTypes = false;
   }
 
   if(!('format' in options) && _isString(dataset)) {
@@ -679,20 +806,45 @@ jsonld.fromRDF = function(dataset, options, callback) {
 
   jsonld.nextTick(function() {
     // handle special format
+    var rdfParser;
     if(options.format) {
-      // supported formats
-      if(options.format in _rdfParsers) {
-        dataset = _rdfParsers[options.format](dataset);
-      }
-      else {
-        throw new JsonLdError(
+      // check supported formats
+      rdfParser = options.rdfParser || _rdfParsers[options.format];
+      if(!rdfParser) {
+        return callback(new JsonLdError(
           'Unknown input format.',
-          'jsonld.UnknownFormat', {format: options.format});
+          'jsonld.UnknownFormat', {format: options.format}));
       }
+    } else {
+      // no-op parser, assume dataset already parsed
+      rdfParser = function() {
+        return dataset;
+      };
     }
 
-    // convert from RDF
-    new Processor().fromRDF(dataset, options, callback);
+    // rdf parser may be async or sync, always pass callback
+    dataset = rdfParser(dataset, function(err, dataset) {
+      if(err) {
+        return callback(err);
+      }
+      fromRDF(dataset, options, callback);
+    });
+    // handle synchronous or promise-based parser
+    if(dataset) {
+      // if dataset is actually a promise
+      if('then' in dataset) {
+        return dataset.then(function(dataset) {
+          fromRDF(dataset, options, callback);
+        }, callback);
+      }
+      // parser is synchronous
+      fromRDF(dataset, options, callback);
+    }
+
+    function fromRDF(dataset, options, callback) {
+      // convert from RDF
+      new Processor().fromRDF(dataset, options, callback);
+    }
   });
 };
 
@@ -702,9 +854,12 @@ jsonld.fromRDF = function(dataset, options, callback) {
  * @param input the JSON-LD input.
  * @param [options] the options to use:
  *          [base] the base IRI to use.
+ *          [expandContext] a context to expand with.
  *          [format] the format to use to output a string:
- *            'application/nquads' for N-Quads (default).
- *          [loadContext(url, callback(err, url, result))] the context loader.
+ *            'application/nquads' for N-Quads.
+ *          [produceGeneralizedRdf] true to output generalized RDF, false
+ *            to produce only standard RDF (default: false).
+ *          [documentLoader(url, callback(err, remoteDoc))] the document loader.
  * @param callback(err, dataset) called once the operation completes.
  */
 jsonld.toRDF = function(input, options, callback) {
@@ -723,28 +878,24 @@ jsonld.toRDF = function(input, options, callback) {
 
   // set default options
   if(!('base' in options)) {
-    options.base = '';
+    options.base = (typeof input === 'string') ? input : '';
   }
-  if(!('loadContext' in options)) {
-    options.loadContext = jsonld.loadContext;
+  if(!('documentLoader' in options)) {
+    options.documentLoader = jsonld.loadDocument;
   }
 
   // expand input
   jsonld.expand(input, options, function(err, expanded) {
     if(err) {
       return callback(new JsonLdError(
-        'Could not expand input before conversion to RDF.',
+        'Could not expand input before serialization to RDF.',
         'jsonld.RdfError', {cause: err}));
     }
 
-    // create node map for default graph (and any named graphs)
-    var namer = new UniqueNamer('_:b');
-    var nodeMap = {'@default': {}};
-    _createNodeMap(expanded, nodeMap, '@default', namer);
-
+    var dataset;
     try {
       // output RDF dataset
-      var dataset = Processor.prototype.toRDF(nodeMap);
+      dataset = Processor.prototype.toRDF(expanded, options);
       if(options.format) {
         if(options.format === 'application/nquads') {
           return callback(null, _toNQuads(dataset));
@@ -753,11 +904,10 @@ jsonld.toRDF = function(input, options, callback) {
           'Unknown output format.',
           'jsonld.UnknownFormat', {format: options.format});
       }
-      callback(null, dataset);
+    } catch(ex) {
+      return callback(ex);
     }
-    catch(ex) {
-      callback(ex);
-    }
+    callback(null, dataset);
   });
 };
 
@@ -771,69 +921,61 @@ jsonld.relabelBlankNodes = function(input) {
 };
 
 /**
- * The default context loader for external @context URLs.
+ * The default document loader for external documents. If the environment
+ * is node.js, a callback-continuation-style document loader is used; otherwise,
+ * a promises-style document loader is used.
  *
- * @param loadContext(url, callback(err, url, result)) the context loader.
+ * @param url the URL to load.
+ * @param callback(err, remoteDoc) called once the operation completes,
+ *          if using a non-promises API.
+ *
+ * @return a promise, if using a promises API.
  */
-jsonld.loadContext = function(url, callback) {
-  return callback(new JsonLdError(
-    'Could not retrieve @context URL. URL derefencing not implemented.',
-    'jsonld.ContextUrlError'), url);
+jsonld.documentLoader = function(url, callback) {
+  var err = new JsonLdError(
+    'Could not retrieve a JSON-LD document from the URL. URL ' +
+    'dereferencing not implemented.', 'jsonld.LoadDocumentError',
+    {code: 'loading document failed'});
+  if(_nodejs) {
+    return callback(err, {contextUrl: null, documentUrl: url, document: null});
+  }
+  return jsonld.promisify(function(callback) {
+    callback(err);
+  });
 };
 
-/* Futures/Promises API */
+/**
+ * Deprecated default document loader. Use or override jsonld.documentLoader
+ * instead.
+ */
+jsonld.loadDocument = function(url, callback) {
+  var promise = jsonld.documentLoader(url, callback);
+  if(promise && 'then' in promise) {
+    promise.then(callback.bind(null, null), callback);
+  }
+};
 
-jsonld.futures = jsonld.promises = function() {
-  var Future = _nodejs ? require('./Future') : global.Future;
+/* Promises API */
+
+jsonld.promises = function() {
+  try {
+    jsonld.Promise = global.Promise || require('es6-promise').Promise;
+  } catch(e) {
+    throw new Error('Unable to find a Promise implementation.');
+  }
   var slice = Array.prototype.slice;
-
-  // converts a node.js async op into a future w/boxed resolved value(s)
-  function futurize(op) {
-    var args = slice.call(arguments, 1);
-    return new Future(function(resolver) {
-      op.apply(null, args.concat(function(err, value) {
-        if(err) {
-          resolver.reject(err);
-        }
-        else {
-          resolver.resolve(value);
-        }
-      }));
-    });
-  }
-
-  // converts a load context promise callback to a node-style callback
-  function createContextLoader(promise) {
-    return function(url, callback) {
-      promise(url).then(
-        // success
-        function(remoteContext) {
-          callback(null, remoteContext.url, remoteContext.context);
-        },
-        // failure
-        callback
-      );
-    };
-  }
+  var promisify = jsonld.promisify;
 
   var api = {};
   api.expand = function(input) {
     if(arguments.length < 1) {
       throw new TypeError('Could not expand, too few arguments.');
     }
-    var options = (arguments.length > 1) ? arguments[1] : {};
-    if('loadContext' in options) {
-      options.loadContext = createContextLoader(options.loadContext);
-    }
-    return futurize.apply(null, [jsonld.expand].concat(slice.call(arguments)));
+    return promisify.apply(null, [jsonld.expand].concat(slice.call(arguments)));
   };
   api.compact = function(input, ctx) {
     if(arguments.length < 2) {
       throw new TypeError('Could not compact, too few arguments.');
-    }
-    var options = (arguments.length > 2) ? arguments[2] : {};
-    if('loadContext' in options) {
-      options.loadContext = createContextLoader(options.loadContext);
     }
     var compact = function(input, ctx, options, callback) {
       // ensure only one value is returned in callback
@@ -841,62 +983,75 @@ jsonld.futures = jsonld.promises = function() {
         callback(err, compacted);
       });
     };
-    return futurize.apply(null, [compact].concat(slice.call(arguments)));
+    return promisify.apply(null, [compact].concat(slice.call(arguments)));
   };
   api.flatten = function(input) {
     if(arguments.length < 1) {
       throw new TypeError('Could not flatten, too few arguments.');
     }
-    var options = (arguments.length > 2) ? arguments[2] : {};
-    if('loadContext' in options) {
-      options.loadContext = createContextLoader(options.loadContext);
-    }
-    return futurize.apply(null, [jsonld.flatten].concat(slice.call(arguments)));
+    return promisify.apply(
+      null, [jsonld.flatten].concat(slice.call(arguments)));
   };
   api.frame = function(input, frame) {
     if(arguments.length < 2) {
       throw new TypeError('Could not frame, too few arguments.');
     }
-    var options = (arguments.length > 2) ? arguments[2] : {};
-    if('loadContext' in options) {
-      options.loadContext = createContextLoader(options.loadContext);
-    }
-    return futurize.apply(null, [jsonld.frame].concat(slice.call(arguments)));
+    return promisify.apply(null, [jsonld.frame].concat(slice.call(arguments)));
   };
   api.fromRDF = function(dataset) {
     if(arguments.length < 1) {
       throw new TypeError('Could not convert from RDF, too few arguments.');
     }
-    return futurize.apply(null, [jsonld.fromRDF].concat(slice.call(arguments)));
+    return promisify.apply(
+      null, [jsonld.fromRDF].concat(slice.call(arguments)));
   };
   api.toRDF = function(input) {
     if(arguments.length < 1) {
       throw new TypeError('Could not convert to RDF, too few arguments.');
     }
-    var options = (arguments.length > 1) ? arguments[1] : {};
-    if('loadContext' in options) {
-      options.loadContext = createContextLoader(options.loadContext);
-    }
-    return futurize.apply(null, [jsonld.toRDF].concat(slice.call(arguments)));
+    return promisify.apply(null, [jsonld.toRDF].concat(slice.call(arguments)));
   };
   api.normalize = function(input) {
     if(arguments.length < 1) {
       throw new TypeError('Could not normalize, too few arguments.');
     }
-    var options = (arguments.length > 1) ? arguments[1] : {};
-    if('loadContext' in options) {
-      options.loadContext = createContextLoader(options.loadContext);
-    }
-    return futurize.apply(
+    return promisify.apply(
       null, [jsonld.normalize].concat(slice.call(arguments)));
   };
   return api;
 };
 
+/**
+ * Converts a node.js async op into a promise w/boxed resolved value(s).
+ *
+ * @param op the operation to convert.
+ *
+ * @return the promise.
+ */
+jsonld.promisify = function(op) {
+  if(!jsonld.Promise) {
+    try {
+      jsonld.Promise = global.Promise || require('es6-promise').Promise;
+    } catch(e) {
+      throw new Error('Unable to find a Promise implementation.');
+    }
+  }
+  var args = Array.prototype.slice.call(arguments, 1);
+  return new jsonld.Promise(function(resolve, reject) {
+    op.apply(null, args.concat(function(err, value) {
+      if(!err) {
+        resolve(value);
+      } else {
+        reject(err);
+      }
+    }));
+  });
+};
+
 /* WebIDL API */
 
 function JsonLdProcessor() {}
-JsonLdProcessor.prototype = jsonld.futures();
+JsonLdProcessor.prototype = jsonld.promises();
 JsonLdProcessor.prototype.toString = function() {
   if(this instanceof JsonLdProcessor) {
     return '[object JsonLdProcessor]';
@@ -904,7 +1059,20 @@ JsonLdProcessor.prototype.toString = function() {
   return '[object JsonLdProcessorPrototype]';
 };
 jsonld.JsonLdProcessor = JsonLdProcessor;
-if(Object.defineProperty) {
+
+// IE8 has Object.defineProperty but it only
+// works on DOM nodes -- so feature detection
+// requires try/catch :-(
+var canDefineProperty = !!Object.defineProperty;
+if(canDefineProperty) {
+  try {
+    Object.defineProperty({}, 'x', {});
+  } catch(e) {
+    canDefineProperty = false;
+  }
+}
+
+if(canDefineProperty) {
   Object.defineProperty(JsonLdProcessor, 'prototype', {
     writable: false,
     enumerable: false
@@ -916,17 +1084,17 @@ if(Object.defineProperty) {
     value: JsonLdProcessor
   });
 }
+
 // setup browser global JsonLdProcessor
 if(_browser && typeof global.JsonLdProcessor === 'undefined') {
-  if(Object.defineProperty) {
+  if(canDefineProperty) {
     Object.defineProperty(global, 'JsonLdProcessor', {
       writable: true,
       enumerable: false,
       configurable: true,
       value: JsonLdProcessor
     });
-  }
-  else {
+  } else {
     global.JsonLdProcessor = JsonLdProcessor;
   }
 }
@@ -936,40 +1104,84 @@ if(_browser && typeof global.JsonLdProcessor === 'undefined') {
 // define setImmediate and nextTick
 if(typeof process === 'undefined' || !process.nextTick) {
   if(typeof setImmediate === 'function') {
-    jsonld.setImmediate = setImmediate;
-    jsonld.nextTick = function(callback) {
+    jsonld.setImmediate = jsonld.nextTick = function(callback) {
       return setImmediate(callback);
     };
-  }
-  else {
+  } else {
     jsonld.setImmediate = function(callback) {
       setTimeout(callback, 0);
     };
     jsonld.nextTick = jsonld.setImmediate;
   }
-}
-else {
+} else {
   jsonld.nextTick = process.nextTick;
   if(typeof setImmediate === 'function') {
     jsonld.setImmediate = setImmediate;
-  }
-  else {
+  } else {
     jsonld.setImmediate = jsonld.nextTick;
   }
 }
 
 /**
- * Creates a simple context cache.
+ * Parses a link header. The results will be key'd by the value of "rel".
+ *
+ * Link: <http://json-ld.org/contexts/person.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
+ *
+ * Parses as: {
+ *   'http://www.w3.org/ns/json-ld#context': {
+ *     target: http://json-ld.org/contexts/person.jsonld,
+ *     type: 'application/ld+json'
+ *   }
+ * }
+ *
+ * If there is more than one "rel" with the same IRI, then entries in the
+ * resulting map for that "rel" will be arrays.
+ *
+ * @param header the link header to parse.
+ */
+jsonld.parseLinkHeader = function(header) {
+  var rval = {};
+  // split on unbracketed/unquoted commas
+  var entries = header.match(/(?:<[^>]*?>|"[^"]*?"|[^,])+/g);
+  var rLinkHeader = /\s*<([^>]*?)>\s*(?:;\s*(.*))?/;
+  for(var i = 0; i < entries.length; ++i) {
+    var match = entries[i].match(rLinkHeader);
+    if(!match) {
+      continue;
+    }
+    var result = {target: match[1]};
+    var params = match[2];
+    var rParams = /(.*?)=(?:(?:"([^"]*?)")|([^"]*?))\s*(?:(?:;\s*)|$)/g;
+    while(match = rParams.exec(params)) {
+      result[match[1]] = (match[2] === undefined) ? match[3] : match[2];
+    }
+    var rel = result['rel'] || '';
+    if(_isArray(rval[rel])) {
+      rval[rel].push(result);
+    } else if(rel in rval) {
+      rval[rel] = [rval[rel], result];
+    } else {
+      rval[rel] = result;
+    }
+  }
+  return rval;
+};
+
+/**
+ * Creates a simple document cache that retains documents for a short
+ * period of time.
+ *
+ * FIXME: Implement simple HTTP caching instead.
  *
  * @param size the maximum size of the cache.
  */
-jsonld.ContextCache = function(size) {
+jsonld.DocumentCache = function(size) {
   this.order = [];
   this.cache = {};
   this.size = size || 50;
-  this.expires = 30*60*1000;
+  this.expires = 30*1000;
 };
-jsonld.ContextCache.prototype.get = function(url) {
+jsonld.DocumentCache.prototype.get = function(url) {
   if(url in this.cache) {
     var entry = this.cache[url];
     if(entry.expires >= +new Date()) {
@@ -980,7 +1192,7 @@ jsonld.ContextCache.prototype.get = function(url) {
   }
   return null;
 };
-jsonld.ContextCache.prototype.set = function(url, ctx) {
+jsonld.DocumentCache.prototype.set = function(url, ctx) {
   if(this.order.length === this.size) {
     delete this.cache[this.order.shift()];
   }
@@ -1019,7 +1231,7 @@ jsonld.ActiveContextCache.prototype.set = function(
   if(!(key1 in this.cache)) {
     this.cache[key1] = {};
   }
-  this.cache[key1][key2] = result;
+  this.cache[key1][key2] = _clone(result);
 };
 
 /**
@@ -1030,149 +1242,343 @@ jsonld.cache = {
 };
 
 /**
- * Context loaders.
+ * Document loaders.
  */
-jsonld.contextLoaders = {};
+jsonld.documentLoaders = {};
 
 /**
- * The built-in jquery context loader.
+ * Creates a built-in jquery document loader.
  *
  * @param $ the jquery instance to use.
  * @param options the options to use:
  *          secure: require all URLs to use HTTPS.
+ *          usePromise: true to use a promises API, false for a
+ *            callback-continuation-style API; defaults to true if Promise
+ *            is globally defined, false if not.
  *
- * @return the jquery context loader.
+ * @return the jquery document loader.
  */
-jsonld.contextLoaders['jquery'] = function($, options) {
+jsonld.documentLoaders.jquery = function($, options) {
   options = options || {};
-  var cache = new jsonld.ContextCache();
-  return function(url, callback) {
+  var loader = function(url, callback) {
+    if(url.indexOf('http:') !== 0 && url.indexOf('https:') !== 0) {
+      return callback(new JsonLdError(
+        'URL could not be dereferenced; only "http" and "https" URLs are ' +
+        'supported.',
+        'jsonld.InvalidUrl', {code: 'loading document failed', url: url}),
+        {contextUrl: null, documentUrl: url, document: null});
+    }
     if(options.secure && url.indexOf('https') !== 0) {
       return callback(new JsonLdError(
         'URL could not be dereferenced; secure mode is enabled and ' +
         'the URL\'s scheme is not "https".',
-        'jsonld.InvalidUrl', {url: url}), url);
-    }
-    var ctx = cache.get(url);
-    if(ctx !== null) {
-      return callback(null, url, ctx);
+        'jsonld.InvalidUrl', {code: 'loading document failed', url: url}),
+        {contextUrl: null, documentUrl: url, document: null});
     }
     $.ajax({
       url: url,
+      accepts: {
+        json: 'application/ld+json, application/json'
+      },
+      // ensure Accept header is very specific for JSON-LD/JSON
+      headers: {
+        'Accept': 'application/ld+json, application/json'
+      },
       dataType: 'json',
       crossDomain: true,
       success: function(data, textStatus, jqXHR) {
-        cache.set(url, data);
-        callback(null, url, data);
+        var doc = {contextUrl: null, documentUrl: url, document: data};
+
+        // handle Link Header
+        var contentType = jqXHR.getResponseHeader('Content-Type');
+        var linkHeader = jqXHR.getResponseHeader('Link');
+        if(linkHeader && contentType !== 'application/ld+json') {
+          // only 1 related link header permitted
+          linkHeader = jsonld.parseLinkHeader(linkHeader)[LINK_HEADER_REL];
+          if(_isArray(linkHeader)) {
+            return callback(new JsonLdError(
+              'URL could not be dereferenced, it has more than one ' +
+              'associated HTTP Link Header.',
+              'jsonld.InvalidUrl',
+              {code: 'multiple context link headers', url: url}), doc);
+          }
+          if(linkHeader) {
+            doc.contextUrl = linkHeader.target;
+          }
+        }
+
+        callback(null, doc);
       },
       error: function(jqXHR, textStatus, err) {
         callback(new JsonLdError(
           'URL could not be dereferenced, an error occurred.',
-          'jsonld.LoadContextError', {url: url, cause: err}), url);
+          'jsonld.LoadDocumentError',
+          {code: 'loading document failed', url: url, cause: err}),
+          {contextUrl: null, documentUrl: url, document: null});
       }
     });
   };
+
+  var usePromise = (typeof Promise !== 'undefined');
+  if('usePromise' in options) {
+    usePromise = options.usePromise;
+  }
+  if(usePromise) {
+    return function(url) {
+      return jsonld.promisify(loader, url);
+    };
+  }
+  return loader;
 };
 
 /**
- * The built-in node context loader.
+ * Creates a built-in node document loader.
  *
  * @param options the options to use:
  *          secure: require all URLs to use HTTPS.
+ *          strictSSL: true to require SSL certificates to be valid,
+ *            false not to (default: true).
  *          maxRedirects: the maximum number of redirects to permit, none by
  *            default.
+ *          usePromise: true to use a promises API, false for a
+ *            callback-continuation-style API; false by default.
  *
- * @return the node context loader.
+ * @return the node document loader.
  */
-jsonld.contextLoaders['node'] = function(options) {
+jsonld.documentLoaders.node = function(options) {
   options = options || {};
+  var strictSSL = ('strictSSL' in options) ? options.strictSSL : true;
   var maxRedirects = ('maxRedirects' in options) ? options.maxRedirects : -1;
   var request = require('request');
   var http = require('http');
-  var cache = new jsonld.ContextCache();
-  function loadContext(url, redirects, callback) {
+  var cache = new jsonld.DocumentCache();
+  function loadDocument(url, redirects, callback) {
+    if(url.indexOf('http:') !== 0 && url.indexOf('https:') !== 0) {
+      return callback(new JsonLdError(
+        'URL could not be dereferenced; only "http" and "https" URLs are ' +
+        'supported.',
+        'jsonld.InvalidUrl', {code: 'loading document failed', url: url}),
+        {contextUrl: null, documentUrl: url, document: null});
+    }
     if(options.secure && url.indexOf('https') !== 0) {
       return callback(new JsonLdError(
         'URL could not be dereferenced; secure mode is enabled and ' +
         'the URL\'s scheme is not "https".',
-        'jsonld.InvalidUrl', {url: url}), url);
+        'jsonld.InvalidUrl', {code: 'loading document failed', url: url}),
+        {contextUrl: null, documentUrl: url, document: null});
     }
-    var ctx = cache.get(url);
-    if(ctx !== null) {
-      return callback(null, url, ctx);
+    var doc = cache.get(url);
+    if(doc !== null) {
+      return callback(null, doc);
     }
     request({
       url: url,
-      strictSSL: true,
+      headers: {
+        'Accept': 'application/ld+json, application/json'
+      },
+      strictSSL: strictSSL,
       followRedirect: false
-    }, function(err, res, body) {
+    }, handleResponse);
+
+    function handleResponse(err, res, body) {
+      doc = {contextUrl: null, documentUrl: url, document: body || null};
+
       // handle error
       if(err) {
         return callback(new JsonLdError(
           'URL could not be dereferenced, an error occurred.',
-          'jsonld.LoadContextError', {url: url, cause: err}), url);
+          'jsonld.LoadDocumentError',
+          {code: 'loading document failed', url: url, cause: err}), doc);
       }
       var statusText = http.STATUS_CODES[res.statusCode];
       if(res.statusCode >= 400) {
         return callback(new JsonLdError(
           'URL could not be dereferenced: ' + statusText,
-          'jsonld.InvalidUrl', {url: url, httpStatusCode: res.statusCode}),
-          url);
+          'jsonld.InvalidUrl', {
+            code: 'loading document failed',
+            url: url,
+            httpStatusCode: res.statusCode
+          }), doc);
       }
+
+      // handle Link Header
+      if(res.headers.link &&
+        res.headers['content-type'] !== 'application/ld+json') {
+        // only 1 related link header permitted
+        var linkHeader = jsonld.parseLinkHeader(
+          res.headers.link)[LINK_HEADER_REL];
+        if(_isArray(linkHeader)) {
+          return callback(new JsonLdError(
+            'URL could not be dereferenced, it has more than one associated ' +
+            'HTTP Link Header.',
+            'jsonld.InvalidUrl',
+            {code: 'multiple context link headers', url: url}), doc);
+        }
+        if(linkHeader) {
+          doc.contextUrl = linkHeader.target;
+        }
+      }
+
       // handle redirect
       if(res.statusCode >= 300 && res.statusCode < 400 &&
         res.headers.location) {
         if(redirects.length === maxRedirects) {
           return callback(new JsonLdError(
             'URL could not be dereferenced; there were too many redirects.',
-            'jsonld.TooManyRedirects',
-            {url: url, httpStatusCode: res.statusCode, redirects: redirects}),
-            url);
+            'jsonld.TooManyRedirects', {
+              code: 'loading document failed',
+              url: url,
+              httpStatusCode: res.statusCode,
+              redirects: redirects
+            }), doc);
         }
         if(redirects.indexOf(url) !== -1) {
           return callback(new JsonLdError(
             'URL could not be dereferenced; infinite redirection was detected.',
-            'jsonld.InfiniteRedirectDetected',
-            {url: url, httpStatusCode: res.statusCode, redirects: redirects}),
-            url);
+            'jsonld.InfiniteRedirectDetected', {
+              code: 'recursive context inclusion',
+              url: url,
+              httpStatusCode: res.statusCode,
+              redirects: redirects
+            }), doc);
         }
         redirects.push(url);
-        return loadContext(res.headers.location, redirects, callback);
+        return loadDocument(res.headers.location, redirects, callback);
       }
       // cache for each redirected URL
       redirects.push(url);
       for(var i = 0; i < redirects.length; ++i) {
-        cache.set(redirects[i], body);
+        cache.set(
+          redirects[i],
+          {contextUrl: null, documentUrl: redirects[i], document: body});
       }
-      callback(err, url, body);
-    });
+      callback(err, doc);
+    }
   }
 
-  return function(url, callback) {
-    loadContext(url, [], callback);
+  var loader = function(url, callback) {
+    loadDocument(url, [], callback);
   };
+  if(options.usePromise) {
+    return function(url) {
+      return jsonld.promisify(loader, url);
+    };
+  }
+  return loader;
 };
 
 /**
- * Assigns the default context loader for external @context URLs to a built-in
+ * Creates a built-in XMLHttpRequest document loader.
+ *
+ * @param options the options to use:
+ *          secure: require all URLs to use HTTPS.
+ *          usePromise: true to use a promises API, false for a
+ *            callback-continuation-style API; defaults to true if Promise
+ *            is globally defined, false if not.
+ *          [xhr]: the XMLHttpRequest API to use.
+ *
+ * @return the XMLHttpRequest document loader.
+ */
+jsonld.documentLoaders.xhr = function(options) {
+  var rlink = /(^|(\r\n))link:/i;
+  options = options || {};
+  var loader = function(url, callback) {
+    if(url.indexOf('http:') !== 0 && url.indexOf('https:') !== 0) {
+      return callback(new JsonLdError(
+        'URL could not be dereferenced; only "http" and "https" URLs are ' +
+        'supported.',
+        'jsonld.InvalidUrl', {code: 'loading document failed', url: url}),
+        {contextUrl: null, documentUrl: url, document: null});
+    }
+    if(options.secure && url.indexOf('https') !== 0) {
+      return callback(new JsonLdError(
+        'URL could not be dereferenced; secure mode is enabled and ' +
+        'the URL\'s scheme is not "https".',
+        'jsonld.InvalidUrl', {code: 'loading document failed', url: url}),
+        {contextUrl: null, documentUrl: url, document: null});
+    }
+    var xhr = options.xhr || XMLHttpRequest;
+    var req = new xhr();
+    req.onload = function(e) {
+      if(req.status >= 400) {
+        return callback(new JsonLdError(
+          'URL could not be dereferenced: ' + req.statusText,
+          'jsonld.LoadDocumentError', {
+            code: 'loading document failed',
+            url: url,
+            httpStatusCode: req.status
+          }), {contextUrl: null, documentUrl: url, document: null});
+      }
+
+      var doc = {contextUrl: null, documentUrl: url, document: req.response};
+
+      // handle Link Header (avoid unsafe header warning by existence testing)
+      var contentType = req.getResponseHeader('Content-Type');
+      var linkHeader;
+      if(rlink.test(req.getAllResponseHeaders())) {
+        linkHeader = req.getResponseHeader('Link');
+      }
+      if(linkHeader && contentType !== 'application/ld+json') {
+        // only 1 related link header permitted
+        linkHeader = jsonld.parseLinkHeader(linkHeader)[LINK_HEADER_REL];
+        if(_isArray(linkHeader)) {
+          return callback(new JsonLdError(
+            'URL could not be dereferenced, it has more than one ' +
+            'associated HTTP Link Header.',
+            'jsonld.InvalidUrl',
+            {code: 'multiple context link headers', url: url}), doc);
+        }
+        if(linkHeader) {
+          doc.contextUrl = linkHeader.target;
+        }
+      }
+
+      callback(null, doc);
+    };
+    req.onerror = function() {
+      callback(new JsonLdError(
+        'URL could not be dereferenced, an error occurred.',
+        'jsonld.LoadDocumentError',
+        {code: 'loading document failed', url: url}),
+        {contextUrl: null, documentUrl: url, document: null});
+    };
+    req.open('GET', url, true);
+    req.setRequestHeader('Accept', 'application/ld+json, application/json');
+    req.send();
+  };
+
+  var usePromise = (typeof Promise !== 'undefined');
+  if('usePromise' in options) {
+    usePromise = options.usePromise;
+  }
+  if(usePromise) {
+    return function(url) {
+      return jsonld.promisify(loader, url);
+    };
+  }
+  return loader;
+};
+
+/**
+ * Assigns the default document loader for external document URLs to a built-in
  * default. Supported types currently include: 'jquery' and 'node'.
  *
- * To use the jquery context loader, the 'data' parameter must be a reference
+ * To use the jquery document loader, the first parameter must be a reference
  * to the main jquery object.
  *
  * @param type the type to set.
- * @param [params] the parameters required to use the context loader.
+ * @param [params] the parameters required to use the document loader.
  */
-jsonld.useContextLoader = function(type) {
-  if(!(type in jsonld.contextLoaders)) {
+jsonld.useDocumentLoader = function(type) {
+  if(!(type in jsonld.documentLoaders)) {
     throw new JsonLdError(
-      'Unknown @context loader type: "' + type + '"',
-      'jsonld.UnknownContextLoader',
+      'Unknown document loader type: "' + type + '"',
+      'jsonld.UnknownDocumentLoader',
       {type: type});
   }
 
-  // set context loader
-  jsonld.loadContext = jsonld.contextLoaders[type].apply(
+  // set document loader
+  jsonld.documentLoader = jsonld.documentLoaders[type].apply(
     jsonld, Array.prototype.slice.call(arguments, 1));
 };
 
@@ -1183,7 +1589,7 @@ jsonld.useContextLoader = function(type) {
  * @param activeCtx the current active context.
  * @param localCtx the local context to process.
  * @param [options] the options to use:
- *          [loadContext(url, callback(err, url, result))] the context loader.
+ *          [documentLoader(url, callback(err, remoteDoc))] the document loader.
  * @param callback(err, ctx) called once the operation completes.
  */
 jsonld.processContext = function(activeCtx, localCtx) {
@@ -1200,8 +1606,8 @@ jsonld.processContext = function(activeCtx, localCtx) {
   if(!('base' in options)) {
     options.base = '';
   }
-  if(!('loadContext' in options)) {
-    options.loadContext = jsonld.loadContext;
+  if(!('documentLoader' in options)) {
+    options.documentLoader = jsonld.loadDocument;
   }
 
   // return initial context early for null context
@@ -1211,8 +1617,7 @@ jsonld.processContext = function(activeCtx, localCtx) {
 
   // retrieve URLs in localCtx
   localCtx = _clone(localCtx);
-  if(_isString(localCtx) ||
-    (_isObject(localCtx) && !('@context' in localCtx))) {
+  if(!(_isObject(localCtx) && '@context' in localCtx)) {
     localCtx = {'@context': localCtx};
   }
   _retrieveContextUrls(localCtx, options, function(err, ctx) {
@@ -1222,11 +1627,10 @@ jsonld.processContext = function(activeCtx, localCtx) {
     try {
       // process context
       ctx = new Processor().processContext(activeCtx, ctx, options);
-      callback(null, ctx);
+    } catch(ex) {
+      return callback(ex);
     }
-    catch(ex) {
-      callback(ex);
-    }
+    callback(null, ctx);
   });
 };
 
@@ -1265,15 +1669,14 @@ jsonld.hasValue = function(subject, property, value) {
       if(isList) {
         val = val['@list'];
       }
-      for(var i in val) {
+      for(var i = 0; i < val.length; ++i) {
         if(jsonld.compareValues(value, val[i])) {
           rval = true;
           break;
         }
       }
-    }
-    // avoid matching the set of values with an array value parameter
-    else if(!_isArray(value)) {
+    } else if(!_isArray(value)) {
+      // avoid matching the set of values with an array value parameter
       rval = jsonld.compareValues(value, val);
     }
   }
@@ -1307,11 +1710,10 @@ jsonld.addValue = function(subject, property, value, options) {
       !(property in subject)) {
       subject[property] = [];
     }
-    for(var i in value) {
+    for(var i = 0; i < value.length; ++i) {
       jsonld.addValue(subject, property, value[i], options);
     }
-  }
-  else if(property in subject) {
+  } else if(property in subject) {
     // check if subject already has value if duplicates not allowed
     var hasValue = (!options.allowDuplicate &&
       jsonld.hasValue(subject, property, value));
@@ -1326,8 +1728,7 @@ jsonld.addValue = function(subject, property, value, options) {
     if(!hasValue) {
       subject[property].push(value);
     }
-  }
-  else {
+  } else {
     // add new value as set or single value
     subject[property] = options.propertyIsArray ? [value] : value;
   }
@@ -1382,11 +1783,9 @@ jsonld.removeValue = function(subject, property, value, options) {
 
   if(values.length === 0) {
     jsonld.removeProperty(subject, property);
-  }
-  else if(values.length === 1 && !options.propertyIsArray) {
+  } else if(values.length === 1 && !options.propertyIsArray) {
     subject[property] = values[0];
-  }
-  else {
+  } else {
     subject[property] = values;
   }
 };
@@ -1456,12 +1855,11 @@ jsonld.getContextValue = function(ctx, key, type) {
   if(ctx.mappings[key]) {
     var entry = ctx.mappings[key];
 
-    // return whole entry
     if(_isUndefined(type)) {
+      // return whole entry
       rval = entry;
-    }
-    // return entry value for type
-    else if(type in entry) {
+    } else if(type in entry) {
+      // return entry value for type
       rval = entry[type];
     }
   }
@@ -1474,11 +1872,24 @@ var _rdfParsers = {};
 
 /**
  * Registers an RDF dataset parser by content-type, for use with
- * jsonld.fromRDF.
+ * jsonld.fromRDF. An RDF dataset parser will always be given two parameters,
+ * a string of input and a callback. An RDF dataset parser can be synchronous
+ * or asynchronous.
+ *
+ * If the parser function returns undefined or null then it will be assumed to
+ * be asynchronous w/a continuation-passing style and the callback parameter
+ * given to the parser MUST be invoked.
+ *
+ * If it returns a Promise, then it will be assumed to be asynchronous, but the
+ * callback parameter MUST NOT be invoked. It should instead be ignored.
+ *
+ * If it returns an RDF dataset, it will be assumed to be synchronous and the
+ * callback parameter MUST NOT be invoked. It should instead be ignored.
  *
  * @param contentType the content-type for the parser.
- * @param parser(input) the parser function (takes a string as a parameter
- *          and returns an RDF dataset).
+ * @param parser(input, callback(err, dataset)) the parser function (takes a
+ *          string as a parameter and either returns null/undefined and uses
+ *          the given callback, returns a Promise, or returns an RDF dataset).
  */
 jsonld.registerRDFParser = function(contentType, parser) {
   _rdfParsers[contentType] = parser;
@@ -1523,6 +1934,7 @@ var XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 var XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 
 var RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+var RDF_LIST = RDF + 'List';
 var RDF_FIRST = RDF + 'first';
 var RDF_REST = RDF + 'rest';
 var RDF_NIL = RDF + 'nil';
@@ -1532,6 +1944,7 @@ var RDF_XML_LITERAL = RDF + 'XMLLiteral';
 var RDF_OBJECT = RDF + 'object';
 var RDF_LANGSTRING = RDF + 'langString';
 
+var LINK_HEADER_REL = 'http://www.w3.org/ns/json-ld#context';
 var MAX_CONTEXT_URLS = 10;
 
 /**
@@ -1576,7 +1989,7 @@ Processor.prototype.compact = function(
   // recursively compact array
   if(_isArray(element)) {
     var rval = [];
-    for(var i in element) {
+    for(var i = 0; i < element.length; ++i) {
       // compact, dropping any null values
       var compacted = this.compact(
         activeCtx, activeProperty, element[i], options);
@@ -1621,9 +2034,8 @@ Processor.prototype.compact = function(
           compactedValue = _compactIri(
             activeCtx, expandedValue, null,
             {vocab: (expandedProperty === '@type')});
-        }
-        // expanded value must be a @type array
-        else {
+        } else {
+          // expanded value must be a @type array
           compactedValue = [];
           for(var vi = 0; vi < expandedValue.length; ++vi) {
             compactedValue.push(_compactIri(
@@ -1649,11 +2061,12 @@ Processor.prototype.compact = function(
         for(var compactedProperty in compactedValue) {
           if(activeCtx.mappings[compactedProperty] &&
             activeCtx.mappings[compactedProperty].reverse) {
-            if(!(compactedProperty in rval) && !options.compactArrays) {
-              rval[compactedProperty] = [];
-            }
+            var value = compactedValue[compactedProperty];
+            var container = jsonld.getContextValue(
+              activeCtx, compactedProperty, '@container');
+            var useArray = (container === '@set' || !options.compactArrays);
             jsonld.addValue(
-              rval, compactedProperty, compactedValue[compactedProperty]);
+              rval, compactedProperty, value, {propertyIsArray: useArray});
             delete compactedValue[compactedProperty];
           }
         }
@@ -1677,6 +2090,15 @@ Processor.prototype.compact = function(
         }
 
         // use keyword alias and add value
+        var alias = _compactIri(activeCtx, expandedProperty);
+        jsonld.addValue(rval, alias, expandedValue);
+        continue;
+      }
+
+      // skip array processing for keywords that aren't @graph or @list
+      if(expandedProperty !== '@graph' && expandedProperty !== '@list' &&
+        _isKeyword(expandedProperty)) {
+        // use keyword alias and add value as is
         var alias = _compactIri(activeCtx, expandedProperty);
         jsonld.addValue(rval, alias, expandedValue);
         continue;
@@ -1733,15 +2155,14 @@ Processor.prototype.compact = function(
               compactedItem[_compactIri(activeCtx, '@index')] =
                 expandedItem['@index'];
             }
-          }
-          // can't use @list container for more than 1 list
-          else if(itemActiveProperty in rval) {
+          } else if(itemActiveProperty in rval) {
+            // can't use @list container for more than 1 list
             throw new JsonLdError(
               'JSON-LD compact error; property has a "@list" @container ' +
               'rule but there is more than a single @list that matches ' +
               'the compacted term in the document. Compaction might mix ' +
               'unwanted items into the list.',
-              'jsonld.SyntaxError');
+              'jsonld.SyntaxError', {code: 'compaction to list of lists'});
           }
         }
 
@@ -1751,8 +2172,7 @@ Processor.prototype.compact = function(
           var mapObject;
           if(itemActiveProperty in rval) {
             mapObject = rval[itemActiveProperty];
-          }
-          else {
+          } else {
             rval[itemActiveProperty] = mapObject = {};
           }
 
@@ -1765,8 +2185,7 @@ Processor.prototype.compact = function(
           // add compact value to map object using key from expanded value
           // based on the container type
           jsonld.addValue(mapObject, expandedItem[container], compactedItem);
-        }
-        else {
+        } else {
           // use an array if: compactArrays flag is false,
           // @container is @set or @list , value is an empty
           // array, or key is @graph
@@ -1807,36 +2226,42 @@ Processor.prototype.expand = function(
   activeCtx, activeProperty, element, options, insideList) {
   var self = this;
 
-  if(typeof element === 'undefined') {
-    throw new JsonLdError(
-      'Invalid JSON-LD syntax; undefined element.',
-      'jsonld.SyntaxError');
+  // nothing to expand
+  if(element === null || element === undefined) {
+    return null;
   }
 
-  // nothing to expand
-  if(element === null) {
-    return null;
+  if(!_isArray(element) && !_isObject(element)) {
+    // drop free-floating scalars that are not in lists
+    if(!insideList && (activeProperty === null ||
+      _expandIri(activeCtx, activeProperty, {vocab: true}) === '@graph')) {
+      return null;
+    }
+
+    // expand element according to value expansion rules
+    return _expandValue(activeCtx, activeProperty, element);
   }
 
   // recursively expand array
   if(_isArray(element)) {
     var rval = [];
-    for(var i in element) {
+    var container = jsonld.getContextValue(
+      activeCtx, activeProperty, '@container');
+    insideList = insideList || container === '@list';
+    for(var i = 0; i < element.length; ++i) {
       // expand element
-      var e = self.expand(
-        activeCtx, activeProperty, element[i], options, insideList);
+      var e = self.expand(activeCtx, activeProperty, element[i], options);
       if(insideList && (_isArray(e) || _isList(e))) {
         // lists of lists are illegal
         throw new JsonLdError(
           'Invalid JSON-LD syntax; lists of lists are not permitted.',
-          'jsonld.SyntaxError');
+          'jsonld.SyntaxError', {code: 'list of lists'});
       }
       // drop null values
-      else if(e !== null) {
+      if(e !== null) {
         if(_isArray(e)) {
           rval = rval.concat(e);
-        }
-        else {
+        } else {
           rval.push(e);
         }
       }
@@ -1844,337 +2269,332 @@ Processor.prototype.expand = function(
     return rval;
   }
 
-  // recursively expand object
-  if(_isObject(element)) {
-    // if element has a context, process it
-    if('@context' in element) {
-      activeCtx = self.processContext(activeCtx, element['@context'], options);
+  // recursively expand object:
+
+  // if element has a context, process it
+  if('@context' in element) {
+    activeCtx = self.processContext(activeCtx, element['@context'], options);
+  }
+
+  // expand the active property
+  var expandedActiveProperty = _expandIri(
+    activeCtx, activeProperty, {vocab: true});
+
+  var rval = {};
+  var keys = Object.keys(element).sort();
+  for(var ki = 0; ki < keys.length; ++ki) {
+    var key = keys[ki];
+    var value = element[key];
+    var expandedValue;
+
+    // skip @context
+    if(key === '@context') {
+      continue;
     }
 
-    // expand the active property
-    var expandedActiveProperty = _expandIri(
-      activeCtx, activeProperty, {vocab: true});
+    // expand property
+    var expandedProperty = _expandIri(activeCtx, key, {vocab: true});
 
-    var rval = {};
-    var keys = Object.keys(element).sort();
-    for(var ki = 0; ki < keys.length; ++ki) {
-      var key = keys[ki];
-      var value = element[key];
-      var expandedValue;
+    // drop non-absolute IRI keys that aren't keywords
+    if(expandedProperty === null ||
+      !(_isAbsoluteIri(expandedProperty) || _isKeyword(expandedProperty))) {
+      continue;
+    }
 
-      // skip @context
-      if(key === '@context') {
-        continue;
-      }
-
-      // expand key to IRI
-      var expandedProperty = _expandIri(activeCtx, key, {vocab: true});
-
-      // drop non-absolute IRI keys that aren't keywords
-      if(expandedProperty === null ||
-        !(_isAbsoluteIri(expandedProperty) || _isKeyword(expandedProperty))) {
-        continue;
-      }
-
-      if(_isKeyword(expandedProperty) &&
-        expandedActiveProperty === '@reverse') {
+    if(_isKeyword(expandedProperty)) {
+      if(expandedActiveProperty === '@reverse') {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; a keyword cannot be used as a @reverse ' +
-          'property.',
-          'jsonld.SyntaxError', {value: value});
+          'property.', 'jsonld.SyntaxError',
+          {code: 'invalid reverse property map', value: value});
       }
+      if(expandedProperty in rval) {
+        throw new JsonLdError(
+          'Invalid JSON-LD syntax; colliding keywords detected.',
+          'jsonld.SyntaxError',
+          {code: 'colliding keywords', keyword: expandedProperty});
+      }
+    }
 
-      // syntax error if @id is not a string
-      if(expandedProperty === '@id' && !_isString(value)) {
+    // syntax error if @id is not a string
+    if(expandedProperty === '@id' && !_isString(value)) {
+      if(!options.isFrame) {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; "@id" value must a string.',
-          'jsonld.SyntaxError', {value: value});
+          'jsonld.SyntaxError', {code: 'invalid @id value', value: value});
       }
-
-      // validate @type value
-      if(expandedProperty === '@type') {
-        _validateTypeValue(value);
-      }
-
-      // @graph must be an array or an object
-      if(expandedProperty === '@graph' &&
-        !(_isObject(value) || _isArray(value))) {
+      if(!_isObject(value)) {
         throw new JsonLdError(
-          'Invalid JSON-LD syntax; "@value" value must not be an ' +
-          'object or an array.',
-          'jsonld.SyntaxError', {value: value});
+          'Invalid JSON-LD syntax; "@id" value must be a string or an ' +
+          'object.', 'jsonld.SyntaxError',
+          {code: 'invalid @id value', value: value});
       }
+    }
 
-      // @value must not be an object or an array
-      if(expandedProperty === '@value' &&
-        (_isObject(value) || _isArray(value))) {
+    if(expandedProperty === '@type') {
+      _validateTypeValue(value);
+    }
+
+    // @graph must be an array or an object
+    if(expandedProperty === '@graph' &&
+      !(_isObject(value) || _isArray(value))) {
+      throw new JsonLdError(
+        'Invalid JSON-LD syntax; "@graph" value must not be an ' +
+        'object or an array.',
+        'jsonld.SyntaxError', {code: 'invalid @graph value', value: value});
+    }
+
+    // @value must not be an object or an array
+    if(expandedProperty === '@value' &&
+      (_isObject(value) || _isArray(value))) {
+      throw new JsonLdError(
+        'Invalid JSON-LD syntax; "@value" value must not be an ' +
+        'object or an array.',
+        'jsonld.SyntaxError',
+        {code: 'invalid value object value', value: value});
+    }
+
+    // @language must be a string
+    if(expandedProperty === '@language') {
+      if(!_isString(value)) {
         throw new JsonLdError(
-          'Invalid JSON-LD syntax; "@value" value must not be an ' +
-          'object or an array.',
-          'jsonld.SyntaxError', {value: value});
+          'Invalid JSON-LD syntax; "@language" value must be a string.',
+          'jsonld.SyntaxError',
+          {code: 'invalid language-tagged string', value: value});
+      }
+      // ensure language value is lowercase
+      value = value.toLowerCase();
+    }
+
+    // @index must be a string
+    if(expandedProperty === '@index') {
+      if(!_isString(value)) {
+        throw new JsonLdError(
+          'Invalid JSON-LD syntax; "@index" value must be a string.',
+          'jsonld.SyntaxError',
+          {code: 'invalid @index value', value: value});
+      }
+    }
+
+    // @reverse must be an object
+    if(expandedProperty === '@reverse') {
+      if(!_isObject(value)) {
+        throw new JsonLdError(
+          'Invalid JSON-LD syntax; "@reverse" value must be an object.',
+          'jsonld.SyntaxError', {code: 'invalid @reverse value', value: value});
       }
 
-      // @language must be a string
-      if(expandedProperty === '@language') {
-        if(!_isString(value)) {
-          throw new JsonLdError(
-            'Invalid JSON-LD syntax; "@language" value must be a string.',
-            'jsonld.SyntaxError', {value: value});
-        }
-        // ensure language value is lowercase
-        value = value.toLowerCase();
-      }
+      expandedValue = self.expand(activeCtx, '@reverse', value, options);
 
-      // @index must be a string
-      if(expandedProperty === '@index') {
-        if(!_isString(value)) {
-          throw new JsonLdError(
-            'Invalid JSON-LD syntax; "@index" value must be a string.',
-            'jsonld.SyntaxError', {value: value});
-        }
-      }
-
-      // @reverse must be an object
-      if(expandedProperty === '@reverse') {
-        if(!_isObject(value)) {
-          throw new JsonLdError(
-            'Invalid JSON-LD syntax; "@reverse" value must be an object.',
-            'jsonld.SyntaxError', {value: value});
-        }
-
-        expandedValue = self.expand(
-          activeCtx, '@reverse', value, options, insideList);
-
-        // properties double-reversed
-        if('@reverse' in expandedValue) {
-          for(var property in expandedValue['@reverse']) {
-            jsonld.addValue(
-              rval, property, expandedValue['@reverse'][property],
-              {propertyIsArray: true});
-          }
-        }
-
-        // FIXME: can this be merged with code below to simplify?
-        // merge in all reversed properties
-        var reverseMap = rval['@reverse'] || null;
-        for(var property in expandedValue) {
-          if(property === '@reverse') {
-            continue;
-          }
-          if(reverseMap === null) {
-            reverseMap = rval['@reverse'] = {};
-          }
-          jsonld.addValue(reverseMap, property, [], {propertyIsArray: true});
-          var items = expandedValue[property];
-          for(var ii = 0; ii < items.length; ++ii) {
-            var item = items[ii];
-            if(_isValue(item) || _isList(item)) {
-              throw new JsonLdError(
-                'Invalid JSON-LD syntax; "@reverse" value must not be a ' +
-                '@value or an @list.',
-                'jsonld.SyntaxError', {value: expandedValue});
-            }
-            jsonld.addValue(
-              reverseMap, property, item, {propertyIsArray: true});
-          }
-        }
-
-        continue;
-      }
-
-      var container = jsonld.getContextValue(activeCtx, key, '@container');
-
-      // handle language map container (skip if value is not an object)
-      if(container === '@language' && _isObject(value)) {
-        expandedValue = _expandLanguageMap(value);
-      }
-      // handle index container (skip if value is not an object)
-      else if(container === '@index' && _isObject(value)) {
-        expandedValue = (function _expandIndexMap(activeProperty) {
-          var rval = [];
-          var keys = Object.keys(value).sort();
-          for(var ki = 0; ki < keys.length; ++ki) {
-            var key = keys[ki];
-            var val = value[key];
-            if(!_isArray(val)) {
-              val = [val];
-            }
-            val = self.expand(activeCtx, activeProperty, val, options, false);
-            for(var vi = 0; vi < val.length; ++vi) {
-              var item = val[vi];
-              if(!('@index' in item)) {
-                item['@index'] = key;
-              }
-              rval.push(item);
-            }
-          }
-          return rval;
-        })(key);
-      }
-      else {
-        // recurse into @list or @set
-        var isList = (expandedProperty === '@list');
-        if(isList || expandedProperty === '@set') {
-          var nextActiveProperty = activeProperty;
-          if(isList && expandedActiveProperty === '@graph') {
-            nextActiveProperty = null;
-          }
-          expandedValue = self.expand(
-            activeCtx, nextActiveProperty, value, options, isList);
-          if(isList && _isList(expandedValue)) {
-            throw new JsonLdError(
-              'Invalid JSON-LD syntax; lists of lists are not permitted.',
-              'jsonld.SyntaxError');
-          }
-        }
-        else {
-          // recursively expand value with key as new active property
-          expandedValue = self.expand(activeCtx, key, value, options, false);
+      // properties double-reversed
+      if('@reverse' in expandedValue) {
+        for(var property in expandedValue['@reverse']) {
+          jsonld.addValue(
+            rval, property, expandedValue['@reverse'][property],
+            {propertyIsArray: true});
         }
       }
 
-      // drop null values if property is not @value
-      if(expandedValue === null && expandedProperty !== '@value') {
-        continue;
-      }
-
-      // convert expanded value to @list if container specifies it
-      if(expandedProperty !== '@list' && !_isList(expandedValue) &&
-        container === '@list') {
-        // ensure expanded value is an array
-        expandedValue = (_isArray(expandedValue) ?
-          expandedValue : [expandedValue]);
-        expandedValue = {'@list': expandedValue};
-      }
-
-      // FIXME: can this be merged with code above to simplify?
-      // merge in reverse properties
-      if(activeCtx.mappings[key] && activeCtx.mappings[key].reverse) {
-        var reverseMap = rval['@reverse'] = {};
-        if(!_isArray(expandedValue)) {
-          expandedValue = [expandedValue];
+      // FIXME: can this be merged with code below to simplify?
+      // merge in all reversed properties
+      var reverseMap = rval['@reverse'] || null;
+      for(var property in expandedValue) {
+        if(property === '@reverse') {
+          continue;
         }
-        for(var ii = 0; ii < expandedValue.length; ++ii) {
-          var item = expandedValue[ii];
+        if(reverseMap === null) {
+          reverseMap = rval['@reverse'] = {};
+        }
+        jsonld.addValue(reverseMap, property, [], {propertyIsArray: true});
+        var items = expandedValue[property];
+        for(var ii = 0; ii < items.length; ++ii) {
+          var item = items[ii];
           if(_isValue(item) || _isList(item)) {
             throw new JsonLdError(
               'Invalid JSON-LD syntax; "@reverse" value must not be a ' +
-              '@value or an @list.',
-              'jsonld.SyntaxError', {value: expandedValue});
+              '@value or an @list.', 'jsonld.SyntaxError',
+              {code: 'invalid reverse property value', value: expandedValue});
           }
           jsonld.addValue(
-            reverseMap, expandedProperty, item, {propertyIsArray: true});
+            reverseMap, property, item, {propertyIsArray: true});
         }
-        continue;
       }
 
-      // add value for property
-      // use an array except for certain keywords
-      var useArray =
-        ['@index', '@id', '@type', '@value', '@language'].indexOf(
-          expandedProperty) === -1;
-      jsonld.addValue(
-        rval, expandedProperty, expandedValue, {propertyIsArray: useArray});
+      continue;
     }
 
-    // get property count on expanded output
-    keys = Object.keys(rval);
-    var count = keys.length;
+    var container = jsonld.getContextValue(activeCtx, key, '@container');
 
-    if('@value' in rval) {
-      // @value must only have @language or @type
-      if('@type' in rval && '@language' in rval) {
-        throw new JsonLdError(
-          'Invalid JSON-LD syntax; an element containing "@value" may not ' +
-          'contain both "@type" and "@language".',
-          'jsonld.SyntaxError', {element: rval});
-      }
-      var validCount = count - 1;
-      if('@type' in rval) {
-        validCount -= 1;
-      }
-      if('@index' in rval) {
-        validCount -= 1;
-      }
-      if('@language' in rval) {
-        validCount -= 1;
-      }
-      if(validCount !== 0) {
-        throw new JsonLdError(
-          'Invalid JSON-LD syntax; an element containing "@value" may only ' +
-          'have an "@index" property and at most one other property ' +
-          'which can be "@type" or "@language".',
-          'jsonld.SyntaxError', {element: rval});
-      }
-      // drop null @values
-      if(rval['@value'] === null) {
-        rval = null;
-      }
-      // drop @language if @value isn't a string
-      else if('@language' in rval && !_isString(rval['@value'])) {
-        delete rval['@language'];
-      }
-    }
-    // convert @type to an array
-    else if('@type' in rval && !_isArray(rval['@type'])) {
-      rval['@type'] = [rval['@type']];
-    }
-    // handle @set and @list
-    else if('@set' in rval || '@list' in rval) {
-      if(count > 1 && (count !== 2 && '@index' in rval)) {
-        throw new JsonLdError(
-          'Invalid JSON-LD syntax; if an element has the property "@set" ' +
-          'or "@list", then it can have at most one other property that is ' +
-          '"@index".',
-          'jsonld.SyntaxError', {element: rval});
-      }
-      // optimize away @set
-      if('@set' in rval) {
-        rval = rval['@set'];
-        keys = Object.keys(rval);
-        count = keys.length;
-      }
-    }
-    // drop objects with only @language
-    else if(count === 1 && '@language' in rval) {
-      rval = null;
-    }
-
-    // drop certain top-level objects that do not occur in lists
-    if(_isObject(rval) &&
-      !options.keepFreeFloatingNodes && !insideList &&
-      (activeProperty === null || expandedActiveProperty === '@graph')) {
-      // drop empty object or top-level @value
-      if(count === 0 || ('@value' in rval)) {
-        rval = null;
-      }
-      else {
-        // drop nodes that generate no triples
-        var hasTriples = false;
-        var ignore = ['@graph', '@type'];
-        for(var ki = 0; !hasTriples && ki < keys.length; ++ki) {
-          if(!_isKeyword(keys[ki]) || ignore.indexOf(keys[ki]) !== -1) {
-            hasTriples = true;
+    if(container === '@language' && _isObject(value)) {
+      // handle language map container (skip if value is not an object)
+      expandedValue = _expandLanguageMap(value);
+    } else if(container === '@index' && _isObject(value)) {
+      // handle index container (skip if value is not an object)
+      expandedValue = (function _expandIndexMap(activeProperty) {
+        var rval = [];
+        var keys = Object.keys(value).sort();
+        for(var ki = 0; ki < keys.length; ++ki) {
+          var key = keys[ki];
+          var val = value[key];
+          if(!_isArray(val)) {
+            val = [val];
+          }
+          val = self.expand(activeCtx, activeProperty, val, options, false);
+          for(var vi = 0; vi < val.length; ++vi) {
+            var item = val[vi];
+            if(!('@index' in item)) {
+              item['@index'] = key;
+            }
+            rval.push(item);
           }
         }
-        if(!hasTriples) {
-          rval = null;
+        return rval;
+      })(key);
+    } else {
+      // recurse into @list or @set
+      var isList = (expandedProperty === '@list');
+      if(isList || expandedProperty === '@set') {
+        var nextActiveProperty = activeProperty;
+        if(isList && expandedActiveProperty === '@graph') {
+          nextActiveProperty = null;
         }
+        expandedValue = self.expand(
+          activeCtx, nextActiveProperty, value, options, isList);
+        if(isList && _isList(expandedValue)) {
+          throw new JsonLdError(
+            'Invalid JSON-LD syntax; lists of lists are not permitted.',
+            'jsonld.SyntaxError', {code: 'list of lists'});
+        }
+      } else {
+        // recursively expand value with key as new active property
+        expandedValue = self.expand(activeCtx, key, value, options, false);
       }
     }
 
-    return rval;
+    // drop null values if property is not @value
+    if(expandedValue === null && expandedProperty !== '@value') {
+      continue;
+    }
+
+    // convert expanded value to @list if container specifies it
+    if(expandedProperty !== '@list' && !_isList(expandedValue) &&
+      container === '@list') {
+      // ensure expanded value is an array
+      expandedValue = (_isArray(expandedValue) ?
+        expandedValue : [expandedValue]);
+      expandedValue = {'@list': expandedValue};
+    }
+
+    // FIXME: can this be merged with code above to simplify?
+    // merge in reverse properties
+    if(activeCtx.mappings[key] && activeCtx.mappings[key].reverse) {
+      var reverseMap = rval['@reverse'] = rval['@reverse'] || {};
+      if(!_isArray(expandedValue)) {
+        expandedValue = [expandedValue];
+      }
+      for(var ii = 0; ii < expandedValue.length; ++ii) {
+        var item = expandedValue[ii];
+        if(_isValue(item) || _isList(item)) {
+          throw new JsonLdError(
+            'Invalid JSON-LD syntax; "@reverse" value must not be a ' +
+            '@value or an @list.', 'jsonld.SyntaxError',
+            {code: 'invalid reverse property value', value: expandedValue});
+        }
+        jsonld.addValue(
+          reverseMap, expandedProperty, item, {propertyIsArray: true});
+      }
+      continue;
+    }
+
+    // add value for property
+    // use an array except for certain keywords
+    var useArray =
+      ['@index', '@id', '@type', '@value', '@language'].indexOf(
+        expandedProperty) === -1;
+    jsonld.addValue(
+      rval, expandedProperty, expandedValue, {propertyIsArray: useArray});
   }
 
-  // drop top-level scalars that are not in lists
-  if(!insideList &&
-    (activeProperty === null ||
-    _expandIri(activeCtx, activeProperty, {vocab: true}) === '@graph')) {
-    return null;
+  // get property count on expanded output
+  keys = Object.keys(rval);
+  var count = keys.length;
+
+  if('@value' in rval) {
+    // @value must only have @language or @type
+    if('@type' in rval && '@language' in rval) {
+      throw new JsonLdError(
+        'Invalid JSON-LD syntax; an element containing "@value" may not ' +
+        'contain both "@type" and "@language".',
+        'jsonld.SyntaxError', {code: 'invalid value object', element: rval});
+    }
+    var validCount = count - 1;
+    if('@type' in rval) {
+      validCount -= 1;
+    }
+    if('@index' in rval) {
+      validCount -= 1;
+    }
+    if('@language' in rval) {
+      validCount -= 1;
+    }
+    if(validCount !== 0) {
+      throw new JsonLdError(
+        'Invalid JSON-LD syntax; an element containing "@value" may only ' +
+        'have an "@index" property and at most one other property ' +
+        'which can be "@type" or "@language".',
+        'jsonld.SyntaxError', {code: 'invalid value object', element: rval});
+    }
+    // drop null @values
+    if(rval['@value'] === null) {
+      rval = null;
+    } else if('@language' in rval && !_isString(rval['@value'])) {
+      // if @language is present, @value must be a string
+      throw new JsonLdError(
+        'Invalid JSON-LD syntax; only strings may be language-tagged.',
+        'jsonld.SyntaxError',
+        {code: 'invalid language-tagged value', element: rval});
+    } else if('@type' in rval && (!_isAbsoluteIri(rval['@type']) ||
+      rval['@type'].indexOf('_:') === 0)) {
+      throw new JsonLdError(
+        'Invalid JSON-LD syntax; an element containing "@value" and "@type" ' +
+        'must have an absolute IRI for the value of "@type".',
+        'jsonld.SyntaxError', {code: 'invalid typed value', element: rval});
+    }
+  } else if('@type' in rval && !_isArray(rval['@type'])) {
+    // convert @type to an array
+    rval['@type'] = [rval['@type']];
+  } else if('@set' in rval || '@list' in rval) {
+    // handle @set and @list
+    if(count > 1 && !(count === 2 && '@index' in rval)) {
+      throw new JsonLdError(
+        'Invalid JSON-LD syntax; if an element has the property "@set" ' +
+        'or "@list", then it can have at most one other property that is ' +
+        '"@index".', 'jsonld.SyntaxError',
+        {code: 'invalid set or list object', element: rval});
+    }
+    // optimize away @set
+    if('@set' in rval) {
+      rval = rval['@set'];
+      keys = Object.keys(rval);
+      count = keys.length;
+    }
+  } else if(count === 1 && '@language' in rval) {
+    // drop objects with only @language
+    rval = null;
   }
 
-  // expand element according to value expansion rules
-  return _expandValue(activeCtx, activeProperty, element);
+  // drop certain top-level objects that do not occur in lists
+  if(_isObject(rval) &&
+    !options.keepFreeFloatingNodes && !insideList &&
+    (activeProperty === null || expandedActiveProperty === '@graph')) {
+    // drop empty object, top-level @value/@list, or object with only @id
+    if(count === 0 || '@value' in rval || '@list' in rval ||
+      (count === 1 && '@id' in rval)) {
+      rval = null;
+    }
+  }
+
+  return rval;
 };
 
 /**
@@ -2205,15 +2625,17 @@ Processor.prototype.flatten = function(input) {
         '@id': graphName,
         '@graph': []
       };
-    }
-    else if(!('@graph' in subject)) {
+    } else if(!('@graph' in subject)) {
       subject['@graph'] = [];
     }
     var graph = subject['@graph'];
     var ids = Object.keys(nodeMap).sort();
     for(var ii = 0; ii < ids.length; ++ii) {
-      var id = ids[ii];
-      graph.push(nodeMap[id]);
+      var node = nodeMap[ids[ii]];
+      // only add full subjects
+      if(!_isSubjectReference(node)) {
+        graph.push(node);
+      }
     }
   }
 
@@ -2221,8 +2643,11 @@ Processor.prototype.flatten = function(input) {
   var flattened = [];
   var keys = Object.keys(defaultGraph).sort();
   for(var ki = 0; ki < keys.length; ++ki) {
-    var key = keys[ki];
-    flattened.push(defaultGraph[key]);
+    var node = defaultGraph[keys[ki]];
+    // only add full subjects to top-level
+    if(!_isSubjectReference(node)) {
+      flattened.push(node);
+    }
   }
   return flattened;
 };
@@ -2245,7 +2670,7 @@ Processor.prototype.frame = function(input, frame, options) {
 
   // produce a map of all graphs and name each bnode
   // FIXME: currently uses subjects from @merged graph only
-  namer = new UniqueNamer('_:b');
+  var namer = new UniqueNamer('_:b');
   _createNodeMap(input, state.graphs, '@merged', namer);
   state.subjects = state.graphs['@merged'];
 
@@ -2276,8 +2701,7 @@ Processor.prototype.normalize = function(dataset, options, callback) {
       if(graphName !== null) {
         if(graphName.indexOf('_:') === 0) {
           quad.name = {type: 'blank node', value: graphName};
-        }
-        else {
+        } else {
           quad.name = {type: 'IRI', value: graphName};
         }
       }
@@ -2290,8 +2714,7 @@ Processor.prototype.normalize = function(dataset, options, callback) {
           var id = quad[attr].value;
           if(id in bnodes) {
             bnodes[id].quads.push(quad);
-          }
-          else {
+          } else {
             bnodes[id] = {quads: [quad]};
           }
         }
@@ -2325,14 +2748,12 @@ Processor.prototype.normalize = function(dataset, options, callback) {
       if(hash in duplicates) {
         duplicates[hash].push(bnode);
         nextUnnamed.push(bnode);
-      }
-      else if(hash in unique) {
+      } else if(hash in unique) {
         duplicates[hash] = [unique[hash], bnode];
         nextUnnamed.push(unique[hash]);
         nextUnnamed.push(bnode);
         delete unique[hash];
-      }
-      else {
+      } else {
         unique[hash] = bnode;
       }
 
@@ -2352,12 +2773,11 @@ Processor.prototype.normalize = function(dataset, options, callback) {
       named = true;
     }
 
-    // continue to hash bnodes if a bnode was assigned a name
     if(named) {
+      // continue to hash bnodes if a bnode was assigned a name
       hashBlankNodes(unnamed);
-    }
-    // name the duplicate hash bnodes
-    else {
+    } else {
+      // name the duplicate hash bnodes
       nameDuplicates(duplicates);
     }
   }
@@ -2463,178 +2883,200 @@ Processor.prototype.normalize = function(dataset, options, callback) {
  * Converts an RDF dataset to JSON-LD.
  *
  * @param dataset the RDF dataset.
- * @param options the RDF conversion options.
+ * @param options the RDF serialization options.
  * @param callback(err, output) called once the operation completes.
  */
 Processor.prototype.fromRDF = function(dataset, options, callback) {
-  // prepare graph map (maps graph name => subjects, lists)
-  var defaultGraph = {subjects: {}, listMap: {}};
-  var graphs = {'@default': defaultGraph};
+  var defaultGraph = {};
+  var graphMap = {'@default': defaultGraph};
+  var referencedOnce = {};
 
-  for(var graphName in dataset) {
-    var triples = dataset[graphName];
-    for(var ti = 0; ti < triples.length; ++ti) {
-      var triple = triples[ti];
+  for(var name in dataset) {
+    var graph = dataset[name];
+    if(!(name in graphMap)) {
+      graphMap[name] = {};
+    }
+    if(name !== '@default' && !(name in defaultGraph)) {
+      defaultGraph[name] = {'@id': name};
+    }
+    var nodeMap = graphMap[name];
+    for(var ti = 0; ti < graph.length; ++ti) {
+      var triple = graph[ti];
 
       // get subject, predicate, object
       var s = triple.subject.value;
       var p = triple.predicate.value;
       var o = triple.object;
 
-      // create a graph entry as needed
-      var graph;
-      if(!(graphName in graphs)) {
-        graph = graphs[graphName] = {subjects: {}, listMap: {}};
+      if(!(s in nodeMap)) {
+        nodeMap[s] = {'@id': s};
       }
-      else {
-        graph = graphs[graphName];
+      var node = nodeMap[s];
+
+      var objectIsId = (o.type === 'IRI' || o.type === 'blank node');
+      if(objectIsId && !(o.value in nodeMap)) {
+        nodeMap[o.value] = {'@id': o.value};
       }
 
-      // handle element in @list
-      if(p === RDF_FIRST) {
-        // create list entry as needed
-        var listMap = graph.listMap;
-        var entry;
-        if(!(s in listMap)) {
-          entry = listMap[s] = {};
-        }
-        else {
-          entry = listMap[s];
-        }
-        // set object value
-        entry.first = _RDFToObject(o, options.useNativeTypes);
+      if(p === RDF_TYPE && !options.useRdfType && objectIsId) {
+        jsonld.addValue(node, '@type', o.value, {propertyIsArray: true});
         continue;
       }
 
-      // handle other element in @list
-      if(p === RDF_REST) {
-        // set next in list
-        if(o.type === 'blank node') {
-          // create list entry as needed
-          var listMap = graph.listMap;
-          var entry;
-          if(!(s in listMap)) {
-            entry = listMap[s] = {};
-          }
-          else {
-            entry = listMap[s];
-          }
-          entry.rest = o.value;
-        }
-        continue;
-      }
+      var value = _RDFToObject(o, options.useNativeTypes);
+      jsonld.addValue(node, p, value, {propertyIsArray: true});
 
-      // add graph subject to default graph as needed
-      if(graphName !== '@default' && !(graphName in defaultGraph.subjects)) {
-        defaultGraph.subjects[graphName] = {'@id': graphName};
-      }
-
-      // add subject to graph as needed
-      var subjects = graph.subjects;
-      var value;
-      if(!(s in subjects)) {
-        value = subjects[s] = {'@id': s};
-      }
-      // use existing subject value
-      else {
-        value = subjects[s];
-      }
-
-      // convert to @type unless options indicate to treat rdf:type as property
-      if(p === RDF_TYPE && !options.useRdfType) {
-        // add value of object as @type
-        jsonld.addValue(value, '@type', o.value, {propertyIsArray: true});
-      }
-      else {
-        // add property to value as needed
-        var object = _RDFToObject(o, options.useNativeTypes);
-        jsonld.addValue(value, p, object, {propertyIsArray: true});
-
-        // a bnode might be the beginning of a list, so add it to the list map
-        if(o.type === 'blank node') {
-          var id = object['@id'];
-          var listMap = graph.listMap;
-          var entry;
-          if(!(id in listMap)) {
-            entry = listMap[id] = {};
+      // object may be an RDF list/partial list node but we can't know easily
+      // until all triples are read
+      if(objectIsId) {
+        if(o.value === RDF_NIL) {
+          // track rdf:nil uniquely per graph
+          var object = nodeMap[o.value];
+          if(!('usages' in object)) {
+            object.usages = [];
           }
-          else {
-            entry = listMap[id];
-          }
-          entry.head = object;
+          object.usages.push({
+            node: node,
+            property: p,
+            value: value
+          });
+        } else if(o.value in referencedOnce) {
+          // object referenced more than once
+          referencedOnce[o.value] = false;
+        } else {
+          // keep track of single reference
+          referencedOnce[o.value] = {
+            node: node,
+            property: p,
+            value: value
+          };
         }
       }
     }
   }
 
-  // build @lists
-  for(var graphName in graphs) {
-    var graph = graphs[graphName];
+  // convert linked lists to @list arrays
+  for(var name in graphMap) {
+    var graphObject = graphMap[name];
 
-    // find list head
-    var listMap = graph.listMap;
-    for(var subject in listMap) {
-      var entry = listMap[subject];
+    // no @lists to be converted, continue
+    if(!(RDF_NIL in graphObject)) {
+      continue;
+    }
 
-      // head found, build lists
-      if('head' in entry && 'first' in entry) {
-        // replace bnode @id with @list
-        delete entry.head['@id'];
-        var list = entry.head['@list'] = [entry.first];
-        while('rest' in entry) {
-          var rest = entry.rest;
-          entry = listMap[rest];
-          if(!('first' in entry)) {
-            throw new JsonLdError(
-              'Invalid RDF list entry.',
-              'jsonld.RdfError', {bnode: rest});
-          }
-          list.push(entry.first);
+    // iterate backwards through each RDF list
+    var nil = graphObject[RDF_NIL];
+    for(var i = 0; i < nil.usages.length; ++i) {
+      var usage = nil.usages[i];
+      var node = usage.node;
+      var property = usage.property;
+      var head = usage.value;
+      var list = [];
+      var listNodes = [];
+
+      // ensure node is a well-formed list node; it must:
+      // 1. Be referenced only once.
+      // 2. Have an array for rdf:first that has 1 item.
+      // 3. Have an array for rdf:rest that has 1 item.
+      // 4. Have no keys other than: @id, rdf:first, rdf:rest, and,
+      //   optionally, @type where the value is rdf:List.
+      var nodeKeyCount = Object.keys(node).length;
+      while(property === RDF_REST &&
+        _isObject(referencedOnce[node['@id']]) &&
+        _isArray(node[RDF_FIRST]) && node[RDF_FIRST].length === 1 &&
+        _isArray(node[RDF_REST]) && node[RDF_REST].length === 1 &&
+        (nodeKeyCount === 3 || (nodeKeyCount === 4 && _isArray(node['@type']) &&
+          node['@type'].length === 1 && node['@type'][0] === RDF_LIST))) {
+        list.push(node[RDF_FIRST][0]);
+        listNodes.push(node['@id']);
+
+        // get next node, moving backwards through list
+        usage = referencedOnce[node['@id']];
+        node = usage.node;
+        property = usage.property;
+        head = usage.value;
+        nodeKeyCount = Object.keys(node).length;
+
+        // if node is not a blank node, then list head found
+        if(node['@id'].indexOf('_:') !== 0) {
+          break;
+        }
+      }
+
+      // the list is nested in another list
+      if(property === RDF_FIRST) {
+        // empty list
+        if(node['@id'] === RDF_NIL) {
+          // can't convert rdf:nil to a @list object because it would
+          // result in a list of lists which isn't supported
+          continue;
+        }
+
+        // preserve list head
+        head = graphObject[head['@id']][RDF_REST][0];
+        list.pop();
+        listNodes.pop();
+      }
+
+      // transform list into @list object
+      delete head['@id'];
+      head['@list'] = list.reverse();
+      for(var j = 0; j < listNodes.length; ++j) {
+        delete graphObject[listNodes[j]];
+      }
+    }
+
+    delete nil.usages;
+  }
+
+  var result = [];
+  var subjects = Object.keys(defaultGraph).sort();
+  for(var i = 0; i < subjects.length; ++i) {
+    var subject = subjects[i];
+    var node = defaultGraph[subject];
+    if(subject in graphMap) {
+      var graph = node['@graph'] = [];
+      var graphObject = graphMap[subject];
+      var subjects_ = Object.keys(graphObject).sort();
+      for(var si = 0; si < subjects_.length; ++si) {
+        var node_ = graphObject[subjects_[si]];
+        // only add full subjects to top-level
+        if(!_isSubjectReference(node_)) {
+          graph.push(node_);
         }
       }
     }
-  }
-
-  // build default graph in subject @id order
-  var output = [];
-  var subjects = defaultGraph.subjects;
-  var ids = Object.keys(subjects).sort();
-  for(var i = 0; i < ids.length; ++i) {
-    var id = ids[i];
-
-    // add subject to default graph
-    var subject = subjects[id];
-    output.push(subject);
-
-    // output named graph in subject @id order
-    if(id in graphs) {
-      var graph = subject['@graph'] = [];
-      var subjects_ = graphs[id].subjects;
-      var ids_ = Object.keys(subjects_).sort();
-      for(var i_ = 0; i_ < ids_.length; ++i_) {
-        graph.push(subjects_[ids_[i_]]);
-      }
+    // only add full subjects to top-level
+    if(!_isSubjectReference(node)) {
+      result.push(node);
     }
   }
-  callback(null, output);
+
+  callback(null, result);
 };
 
 /**
- * Adds RDF triples for each graph in the given node map to an RDF dataset.
+ * Outputs an RDF dataset for the expanded JSON-LD input.
  *
- * @param nodeMap the node map.
+ * @param input the expanded JSON-LD input.
+ * @param options the RDF serialization options.
  *
  * @return the RDF dataset.
  */
-Processor.prototype.toRDF = function(nodeMap) {
+Processor.prototype.toRDF = function(input, options) {
+  // create node map for default graph (and any named graphs)
   var namer = new UniqueNamer('_:b');
+  var nodeMap = {'@default': {}};
+  _createNodeMap(input, nodeMap, '@default', namer);
+
   var dataset = {};
-  for(var graphName in nodeMap) {
-    var graph = nodeMap[graphName];
-    if(graphName.indexOf('_:') === 0) {
-      graphName = namer.getName(graphName);
+  var graphNames = Object.keys(nodeMap).sort();
+  for(var i = 0; i < graphNames.length; ++i) {
+    var graphName = graphNames[i];
+    // skip relative IRIs
+    if(graphName === '@default' || _isAbsoluteIri(graphName)) {
+      dataset[graphName] = _graphToRDF(nodeMap[graphName], namer, options);
     }
-    dataset[graphName] = _graphToRDF(graph, namer);
   }
   return dataset;
 };
@@ -2649,19 +3091,6 @@ Processor.prototype.toRDF = function(nodeMap) {
  * @return the new active context.
  */
 Processor.prototype.processContext = function(activeCtx, localCtx, options) {
-  var rval = null;
-
-  // get context from cache if available
-  if(jsonld.cache.activeCtx) {
-    rval = jsonld.cache.activeCtx.get(activeCtx, localCtx);
-    if(rval) {
-      return rval;
-    }
-  }
-
-  // initialize the resulting context
-  rval = activeCtx.clone();
-
   // normalize local context to an array of @context objects
   if(_isObject(localCtx) && '@context' in localCtx &&
     _isArray(localCtx['@context'])) {
@@ -2669,13 +3098,20 @@ Processor.prototype.processContext = function(activeCtx, localCtx, options) {
   }
   var ctxs = _isArray(localCtx) ? localCtx : [localCtx];
 
-  // process each context in order
-  for(var i in ctxs) {
+  // no contexts in array, clone existing context
+  if(ctxs.length === 0) {
+    return activeCtx.clone();
+  }
+
+  // process each context in order, update active context
+  // on each iteration to ensure proper caching
+  var rval = activeCtx;
+  for(var i = 0; i < ctxs.length; ++i) {
     var ctx = ctxs[i];
 
-    // reset to initial context, keeping namer
+    // reset to initial context
     if(ctx === null) {
-      rval = _getInitialContext(options);
+      rval = activeCtx = _getInitialContext(options);
       continue;
     }
 
@@ -2688,8 +3124,21 @@ Processor.prototype.processContext = function(activeCtx, localCtx, options) {
     if(!_isObject(ctx)) {
       throw new JsonLdError(
         'Invalid JSON-LD syntax; @context must be an object.',
-        'jsonld.SyntaxError', {context: ctx});
+        'jsonld.SyntaxError', {code: 'invalid local context', context: ctx});
     }
+
+    // get context from cache if available
+    if(jsonld.cache.activeCtx) {
+      var cached = jsonld.cache.activeCtx.get(activeCtx, ctx);
+      if(cached) {
+        rval = activeCtx = cached;
+        continue;
+      }
+    }
+
+    // update active context and clone new one before updating
+    activeCtx = rval;
+    rval = rval.clone();
 
     // define context mappings for keys in local context
     var defined = {};
@@ -2698,24 +3147,24 @@ Processor.prototype.processContext = function(activeCtx, localCtx, options) {
     if('@base' in ctx) {
       var base = ctx['@base'];
 
-      // reset base
+      // clear base
       if(base === null) {
-        base = options.base;
-      }
-      else if(!_isString(base)) {
+        base = null;
+      } else if(!_isString(base)) {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; the value of "@base" in a ' +
           '@context must be a string or null.',
-          'jsonld.SyntaxError', {context: ctx});
-      }
-      else if(base !== '' && !_isAbsoluteIri(base)) {
+          'jsonld.SyntaxError', {code: 'invalid base IRI', context: ctx});
+      } else if(base !== '' && !_isAbsoluteIri(base)) {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; the value of "@base" in a ' +
           '@context must be an absolute IRI or the empty string.',
-          'jsonld.SyntaxError', {context: ctx});
+          'jsonld.SyntaxError', {code: 'invalid base IRI', context: ctx});
       }
 
-      base = jsonld.url.parse(base || '');
+      if(base !== null) {
+        base = jsonld.url.parse(base || '');
+      }
       rval['@base'] = base;
       defined['@base'] = true;
     }
@@ -2725,20 +3174,17 @@ Processor.prototype.processContext = function(activeCtx, localCtx, options) {
       var value = ctx['@vocab'];
       if(value === null) {
         delete rval['@vocab'];
-      }
-      else if(!_isString(value)) {
+      } else if(!_isString(value)) {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; the value of "@vocab" in a ' +
           '@context must be a string or null.',
-          'jsonld.SyntaxError', {context: ctx});
-      }
-      else if(!_isAbsoluteIri(value)) {
+          'jsonld.SyntaxError', {code: 'invalid vocab mapping', context: ctx});
+      } else if(!_isAbsoluteIri(value)) {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; the value of "@vocab" in a ' +
           '@context must be an absolute IRI.',
-          'jsonld.SyntaxError', {context: ctx});
-      }
-      else {
+          'jsonld.SyntaxError', {code: 'invalid vocab mapping', context: ctx});
+      } else {
         rval['@vocab'] = value;
       }
       defined['@vocab'] = true;
@@ -2749,14 +3195,13 @@ Processor.prototype.processContext = function(activeCtx, localCtx, options) {
       var value = ctx['@language'];
       if(value === null) {
         delete rval['@language'];
-      }
-      else if(!_isString(value)) {
+      } else if(!_isString(value)) {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; the value of "@language" in a ' +
           '@context must be a string or null.',
-          'jsonld.SyntaxError', {context: ctx});
-      }
-      else {
+          'jsonld.SyntaxError',
+          {code: 'invalid default language', context: ctx});
+      } else {
         rval['@language'] = value.toLowerCase();
       }
       defined['@language'] = true;
@@ -2766,11 +3211,11 @@ Processor.prototype.processContext = function(activeCtx, localCtx, options) {
     for(var key in ctx) {
       _createTermDefinition(rval, ctx, key, defined);
     }
-  }
 
-  // cache result
-  if(jsonld.cache.activeCtx) {
-    jsonld.cache.activeCtx.set(activeCtx, localCtx, rval);
+    // cache result
+    if(jsonld.cache.activeCtx) {
+      jsonld.cache.activeCtx.set(activeCtx, ctx, rval);
+    }
   }
 
   return rval;
@@ -2797,7 +3242,8 @@ function _expandLanguageMap(languageMap) {
       if(!_isString(item)) {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; language map values must be strings.',
-          'jsonld.SyntaxError', {languageMap: languageMap});
+          'jsonld.SyntaxError',
+          {code: 'invalid language map value', languageMap: languageMap});
       }
       rval.push({
         '@value': item,
@@ -2821,11 +3267,9 @@ function _labelBlankNodes(namer, element) {
     for(var i = 0; i < element.length; ++i) {
       element[i] = _labelBlankNodes(namer, element[i]);
     }
-  }
-  else if(_isList(element)) {
+  } else if(_isList(element)) {
     element['@list'] = _labelBlankNodes(namer, element['@list']);
-  }
-  else if(_isObject(element)) {
+  } else if(_isObject(element)) {
     // rename blank node
     if(_isBlankNode(element)) {
       element['@id'] = namer.getName(element['@id']);
@@ -2856,7 +3300,7 @@ function _labelBlankNodes(namer, element) {
  */
 function _expandValue(activeCtx, activeProperty, value) {
   // nothing to expand
-  if(value === null) {
+  if(value === null || value === undefined) {
     return null;
   }
 
@@ -2864,8 +3308,7 @@ function _expandValue(activeCtx, activeProperty, value) {
   var expandedProperty = _expandIri(activeCtx, activeProperty, {vocab: true});
   if(expandedProperty === '@id') {
     return _expandIri(activeCtx, value, {base: true});
-  }
-  else if(expandedProperty === '@type') {
+  } else if(expandedProperty === '@type') {
     return _expandIri(activeCtx, value, {vocab: true, base: true});
   }
 
@@ -2886,19 +3329,22 @@ function _expandValue(activeCtx, activeProperty, value) {
     return value;
   }
 
-  rval = {};
+  var rval = {};
 
-  // other type
   if(type !== null) {
+    // other type
     rval['@type'] = type;
-  }
-  // check for language tagging for strings
-  else if(_isString(value)) {
+  } else if(_isString(value)) {
+    // check for language tagging for strings
     var language = jsonld.getContextValue(
       activeCtx, activeProperty, '@language');
     if(language !== null) {
       rval['@language'] = language;
     }
+  }
+  // do conversion of values that aren't basic JSON types to strings
+  if(['boolean', 'number', 'string'].indexOf(typeof value) === -1) {
+    value = value.toString();
   }
   rval['@value'] = value;
 
@@ -2910,49 +3356,65 @@ function _expandValue(activeCtx, activeProperty, value) {
  *
  * @param graph the graph to create RDF triples for.
  * @param namer a UniqueNamer for assigning blank node names.
+ * @param options the RDF serialization options.
  *
  * @return the array of RDF triples for the given graph.
  */
-function _graphToRDF(graph, namer) {
+function _graphToRDF(graph, namer, options) {
   var rval = [];
 
-  for(var id in graph) {
+  var ids = Object.keys(graph).sort();
+  for(var i = 0; i < ids.length; ++i) {
+    var id = ids[i];
     var node = graph[id];
-    for(var property in node) {
+    var properties = Object.keys(node).sort();
+    for(var pi = 0; pi < properties.length; ++pi) {
+      var property = properties[pi];
       var items = node[property];
       if(property === '@type') {
         property = RDF_TYPE;
-      }
-      else if(_isKeyword(property)) {
+      } else if(_isKeyword(property)) {
         continue;
       }
 
-      for(var i = 0; i < items.length; ++i) {
-        var item = items[i];
+      for(var ii = 0; ii < items.length; ++ii) {
+        var item = items[ii];
 
         // RDF subject
         var subject = {};
-        if(id.indexOf('_:') === 0) {
-          subject.type = 'blank node';
-          subject.value = namer.getName(id);
-        }
-        else {
-          subject.type = 'IRI';
-          subject.value = id;
+        subject.type = (id.indexOf('_:') === 0) ? 'blank node' : 'IRI';
+        subject.value = id;
+
+        // skip relative IRI subjects
+        if(!_isAbsoluteIri(id)) {
+          continue;
         }
 
         // RDF predicate
-        var predicate = {type: 'IRI'};
+        var predicate = {};
+        predicate.type = (property.indexOf('_:') === 0) ? 'blank node' : 'IRI';
         predicate.value = property;
+
+        // skip relative IRI predicates
+        if(!_isAbsoluteIri(property)) {
+          continue;
+        }
+
+        // skip blank node predicates unless producing generalized RDF
+        if(predicate.type === 'blank node' && !options.produceGeneralizedRdf) {
+          continue;
+        }
 
         // convert @list to triples
         if(_isList(item)) {
           _listToRDF(item['@list'], namer, subject, predicate, rval);
-        }
-        // convert value or node object to triple
-        else {
-          var object = _objectToRDF(item, namer);
-          rval.push({subject: subject, predicate: predicate, object: object});
+        } else {
+          // convert value or node object to triple
+          var object = _objectToRDF(item);
+          // skip null objects (they are relative IRIs)
+          if(object) {
+            rval.push({subject: subject, predicate: predicate, object: object});
+          }
         }
       }
     }
@@ -2984,8 +3446,12 @@ function _listToRDF(list, namer, subject, predicate, triples) {
 
     subject = blankNode;
     predicate = first;
-    var object = _objectToRDF(item, namer);
-    triples.push({subject: subject, predicate: predicate, object: object});
+    var object = _objectToRDF(item);
+
+    // skip null objects (they are relative IRIs)
+    if(object) {
+      triples.push({subject: subject, predicate: predicate, object: object});
+    }
 
     predicate = rest;
   }
@@ -2998,11 +3464,10 @@ function _listToRDF(list, namer, subject, predicate, triples) {
  * node object to an RDF resource.
  *
  * @param item the JSON-LD value or node object.
- * @param namer the UniqueNamer to use to assign blank node names.
  *
  * @return the RDF literal or RDF resource.
  */
-function _objectToRDF(item, namer) {
+function _objectToRDF(item) {
   var object = {};
 
   // convert value object to RDF
@@ -3015,37 +3480,31 @@ function _objectToRDF(item, namer) {
     if(_isBoolean(value)) {
       object.value = value.toString();
       object.datatype = datatype || XSD_BOOLEAN;
-    }
-    else if(_isDouble(value)) {
+    } else if(_isDouble(value) || datatype === XSD_DOUBLE) {
       // canonical double representation
       object.value = value.toExponential(15).replace(/(\d)0*e\+?/, '$1E');
       object.datatype = datatype || XSD_DOUBLE;
-    }
-    else if(_isNumber(value)) {
+    } else if(_isNumber(value)) {
       object.value = value.toFixed(0);
       object.datatype = datatype || XSD_INTEGER;
-    }
-    else if('@language' in item) {
+    } else if('@language' in item) {
       object.value = value;
       object.datatype = datatype || RDF_LANGSTRING;
       object.language = item['@language'];
-    }
-    else {
+    } else {
       object.value = value;
       object.datatype = datatype || XSD_STRING;
     }
-  }
-  // convert string/node object to RDF
-  else {
+  } else {
+    // convert string/node object to RDF
     var id = _isObject(item) ? item['@id'] : item;
-    if(id.indexOf('_:') === 0) {
-      object.type = 'blank node';
-      object.value = namer.getName(id);
-    }
-    else {
-      object.type = 'IRI';
-      object.value = id;
-    }
+    object.type = (id.indexOf('_:') === 0) ? 'blank node' : 'IRI';
+    object.value = id;
+  }
+
+  // skip relative IRIs
+  if(object.type === 'IRI' && !_isAbsoluteIri(object.value)) {
+    return null;
   }
 
   return object;
@@ -3060,11 +3519,6 @@ function _objectToRDF(item, namer) {
  * @return the JSON-LD object.
  */
 function _RDFToObject(o, useNativeTypes) {
-  // convert empty list
-  if(o.type === 'IRI' && o.value === RDF_NIL) {
-    return {'@list': []};
-  }
-
   // convert IRI/blank node object to JSON-LD
   if(o.type === 'IRI' || o.type === 'blank node') {
     return {'@id': o.value};
@@ -3074,30 +3528,28 @@ function _RDFToObject(o, useNativeTypes) {
   var rval = {'@value': o.value};
 
   // add language
-  if('language' in o) {
+  if(o['language']) {
     rval['@language'] = o.language;
-  }
-  // add datatype
-  else {
+  } else {
     var type = o.datatype;
+    if(!type) {
+      type = XSD_STRING;
+    }
     // use native types for certain xsd types
     if(useNativeTypes) {
       if(type === XSD_BOOLEAN) {
         if(rval['@value'] === 'true') {
           rval['@value'] = true;
-        }
-        else if(rval['@value'] === 'false') {
+        } else if(rval['@value'] === 'false') {
           rval['@value'] = false;
         }
-      }
-      else if(_isNumeric(rval['@value'])) {
+      } else if(_isNumeric(rval['@value'])) {
         if(type === XSD_INTEGER) {
           var i = parseInt(rval['@value']);
           if(i.toFixed(0) === rval['@value']) {
             rval['@value'] = i;
           }
-        }
-        else if(type === XSD_DOUBLE) {
+        } else if(type === XSD_DOUBLE) {
           rval['@value'] = parseFloat(rval['@value']);
         }
       }
@@ -3106,8 +3558,7 @@ function _RDFToObject(o, useNativeTypes) {
         .indexOf(type) === -1) {
         rval['@type'] = type;
       }
-    }
-    else {
+    } else if(type !== XSD_STRING) {
       rval['@type'] = type;
     }
   }
@@ -3204,8 +3655,7 @@ function _hashPaths(id, bnodes, namer, pathNamer, callback) {
     if(bnode !== null) {
       // normal property
       direction = 'p';
-    }
-    else {
+    } else {
       bnode = _getAdjacentBlankNodeName(quad.object, id);
       if(bnode !== null) {
         // reverse property
@@ -3218,11 +3668,9 @@ function _hashPaths(id, bnodes, namer, pathNamer, callback) {
       var name;
       if(namer.isNamed(bnode)) {
         name = namer.getName(bnode);
-      }
-      else if(pathNamer.isNamed(bnode)) {
+      } else if(pathNamer.isNamed(bnode)) {
         name = pathNamer.getName(bnode);
-      }
-      else {
+      } else {
         name = _hashQuads(bnode, bnodes, namer);
       }
 
@@ -3236,8 +3684,7 @@ function _hashPaths(id, bnodes, namer, pathNamer, callback) {
       // add bnode to hash group
       if(groupHash in groups) {
         groups[groupHash].push(bnode);
-      }
-      else {
+      } else {
         groups[groupHash] = [bnode];
       }
     }
@@ -3274,8 +3721,7 @@ function _hashPaths(id, bnodes, namer, pathNamer, callback) {
         // use canonical name if available
         if(namer.isNamed(bnode)) {
           path += namer.getName(bnode);
-        }
-        else {
+        } else {
           // recurse if bnode isn't named in the path yet
           if(!pathNamerCopy.isNamed(bnode)) {
             recurse.push(bnode);
@@ -3329,8 +3775,7 @@ function _hashPaths(id, bnodes, namer, pathNamer, callback) {
         // do next permutation
         if(permutator.hasNext()) {
           jsonld.setImmediate(function() {permutate();});
-        }
-        else {
+        } else {
           // digest chosen path and update namer
           md.update(chosenPath);
           pathNamer = chosenNamer;
@@ -3371,7 +3816,7 @@ function _getAdjacentBlankNodeName(node, id) {
 function _createNodeMap(input, graphs, graph, namer, name, list) {
   // recurse through array
   if(_isArray(input)) {
-    for(var i in input) {
+    for(var i = 0; i < input.length; ++i) {
       _createNodeMap(input[i], graphs, graph, namer, undefined, list);
     }
     return;
@@ -3393,9 +3838,6 @@ function _createNodeMap(input, graphs, graph, namer, name, list) {
       if(type.indexOf('_:') === 0) {
         input['@type'] = type = namer.getName(type);
       }
-      if(!(type in graphs[graph])) {
-        graphs[graph][type] = {'@id': type};
-      }
     }
     if(list) {
       list.push(input);
@@ -3404,6 +3846,17 @@ function _createNodeMap(input, graphs, graph, namer, name, list) {
   }
 
   // Note: At this point, input must be a subject.
+
+  // spec requires @type to be named first, so assign names early
+  if('@type' in input) {
+    var types = input['@type'];
+    for(var i = 0; i < types.length; ++i) {
+      var type = types[i];
+      if(type.indexOf('_:') === 0) {
+        namer.getName(type);
+      }
+    }
+  }
 
   // get name for subject
   if(_isUndefined(name)) {
@@ -3436,10 +3889,14 @@ function _createNodeMap(input, graphs, graph, namer, name, list) {
         var items = reverseMap[reverseProperty];
         for(var ii = 0; ii < items.length; ++ii) {
           var item = items[ii];
+          var itemName = item['@id'];
+          if(_isBlankNode(item)) {
+            itemName = namer.getName(itemName);
+          }
+          _createNodeMap(item, graphs, graph, namer, itemName);
           jsonld.addValue(
-            item, reverseProperty, referencedNode,
+            subjects[itemName], reverseProperty, referencedNode,
             {propertyIsArray: true, allowDuplicate: false});
-          _createNodeMap(item, graphs, graph, namer);
         }
       }
       continue;
@@ -3461,7 +3918,8 @@ function _createNodeMap(input, graphs, graph, namer, name, list) {
       if(property === '@index' && '@index' in subject) {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; conflicting @index property detected.',
-          'jsonld.SyntaxError', {subject: subject});
+          'jsonld.SyntaxError',
+          {code: 'conflicting indexes', subject: subject});
       }
       subject[property] = input[property];
       continue;
@@ -3486,9 +3944,6 @@ function _createNodeMap(input, graphs, graph, namer, name, list) {
       if(property === '@type') {
         // rename @type blank nodes
         o = (o.indexOf('_:') === 0) ? namer.getName(o) : o;
-        if(!(o in graphs[graph])) {
-          graphs[graph][o] = {'@id': o};
-        }
       }
 
       // handle embedded subject or subject reference
@@ -3501,18 +3956,16 @@ function _createNodeMap(input, graphs, graph, namer, name, list) {
           subject, property, {'@id': id},
           {propertyIsArray: true, allowDuplicate: false});
         _createNodeMap(o, graphs, graph, namer, id);
-      }
-      // handle @list
-      else if(_isList(o)) {
+      } else if(_isList(o)) {
+        // handle @list
         var _list = [];
         _createNodeMap(o['@list'], graphs, graph, namer, name, _list);
         o = {'@list': _list};
         jsonld.addValue(
           subject, property, o,
           {propertyIsArray: true, allowDuplicate: false});
-      }
-      // handle @value
-      else {
+      } else {
+        // handle @value
         _createNodeMap(o, graphs, graph, namer, name);
         jsonld.addValue(
           subject, property, o, {propertyIsArray: true, allowDuplicate: false});
@@ -3535,13 +3988,19 @@ function _frame(state, subjects, frame, parent, property) {
   _validateFrame(state, frame);
   frame = frame[0];
 
-  // filter out subjects that match the frame
-  var matches = _filterSubjects(state, subjects, frame);
-
   // get flags for current frame
   var options = state.options;
   var embedOn = _getFrameFlag(frame, options, 'embed');
   var explicitOn = _getFrameFlag(frame, options, 'explicit');
+  var requireAllOn = _getFrameFlag(frame, options, 'requireAll');
+  var flags = {
+    embed: embedOn,
+    explicit: explicitOn,
+    requireAll: requireAllOn
+  };
+
+  // filter out subjects that match the frame
+  var matches = _filterSubjects(state, subjects, frame, flags);
 
   // add matches to output
   var ids = Object.keys(matches).sort();
@@ -3572,15 +4031,14 @@ function _frame(state, subjects, frame, parent, property) {
       // existing embed's parent is an array
       var existing = state.embeds[id];
       if(_isArray(existing.parent)) {
-        for(var i in existing.parent) {
+        for(var i = 0; i < existing.parent.length; ++i) {
           if(jsonld.compareValues(output, existing.parent[i])) {
             embedOn = true;
             break;
           }
         }
-      }
-      // existing embed's parent is an object
-      else if(jsonld.hasValue(existing.parent, existing.property, output)) {
+      } else if(jsonld.hasValue(existing.parent, existing.property, output)) {
+        // existing embed's parent is an object
         embedOn = true;
       }
 
@@ -3593,99 +4051,98 @@ function _frame(state, subjects, frame, parent, property) {
     // not embedding, add output without any other properties
     if(!embedOn) {
       _addFrameOutput(state, parent, property, output);
+      continue;
     }
-    else {
-      // add embed meta info
-      state.embeds[id] = embed;
 
-      // iterate over subject properties
-      var subject = matches[id];
-      var props = Object.keys(subject).sort();
-      for(var i in props) {
-        var prop = props[i];
+    // add embed meta info
+    state.embeds[id] = embed;
 
-        // copy keywords to output
-        if(_isKeyword(prop)) {
-          output[prop] = _clone(subject[prop]);
-          continue;
+    // iterate over subject properties
+    var subject = matches[id];
+    var props = Object.keys(subject).sort();
+    for(var i = 0; i < props.length; i++) {
+      var prop = props[i];
+
+      // copy keywords to output
+      if(_isKeyword(prop)) {
+        output[prop] = _clone(subject[prop]);
+        continue;
+      }
+
+      // if property isn't in the frame
+      if(!(prop in frame)) {
+        // if explicit is off, embed values
+        if(!explicitOn) {
+          _embedValues(state, subject, prop, output);
         }
+        continue;
+      }
 
-        // if property isn't in the frame
-        if(!(prop in frame)) {
-          // if explicit is off, embed values
-          if(!explicitOn) {
-            _embedValues(state, subject, prop, output);
-          }
-          continue;
-        }
+      // add objects
+      var objects = subject[prop];
+      for(var oi = 0; oi < objects.length; ++oi) {
+        var o = objects[oi];
 
-        // add objects
-        var objects = subject[prop];
-        for(var i in objects) {
-          var o = objects[i];
+        // recurse into list
+        if(_isList(o)) {
+          // add empty list
+          var list = {'@list': []};
+          _addFrameOutput(state, output, prop, list);
 
-          // recurse into list
-          if(_isList(o)) {
-            // add empty list
-            var list = {'@list': []};
-            _addFrameOutput(state, output, prop, list);
-
-            // add list objects
-            var src = o['@list'];
-            for(var n in src) {
-              o = src[n];
+          // add list objects
+          var src = o['@list'];
+          for(var n in src) {
+            o = src[n];
+            if(_isSubjectReference(o)) {
               // recurse into subject reference
-              if(_isSubjectReference(o)) {
-                _frame(state, [o['@id']], frame[prop], list, '@list');
-              }
+              _frame(state, [o['@id']], frame[prop][0]['@list'],
+              list, '@list');
+            } else {
               // include other values automatically
-              else {
-                _addFrameOutput(state, list, '@list', _clone(o));
-              }
+              _addFrameOutput(state, list, '@list', _clone(o));
             }
-            continue;
           }
-
-          // recurse into subject reference
-          if(_isSubjectReference(o)) {
-            _frame(state, [o['@id']], frame[prop], output, prop);
-          }
-          // include other values automatically
-          else {
-            _addFrameOutput(state, output, prop, _clone(o));
-          }
-        }
-      }
-
-      // handle defaults
-      var props = Object.keys(frame).sort();
-      for(var i in props) {
-        var prop = props[i];
-
-        // skip keywords
-        if(_isKeyword(prop)) {
           continue;
         }
 
-        // if omit default is off, then include default values for properties
-        // that appear in the next frame but are not in the matching subject
-        var next = frame[prop][0];
-        var omitDefaultOn = _getFrameFlag(next, options, 'omitDefault');
-        if(!omitDefaultOn && !(prop in output)) {
-          var preserve = '@null';
-          if('@default' in next) {
-            preserve = _clone(next['@default']);
-          }
-          if(!_isArray(preserve)) {
-            preserve = [preserve];
-          }
-          output[prop] = [{'@preserve': preserve}];
+        if(_isSubjectReference(o)) {
+          // recurse into subject reference
+          _frame(state, [o['@id']], frame[prop], output, prop);
+        } else {
+          // include other values automatically
+          _addFrameOutput(state, output, prop, _clone(o));
         }
       }
-
-      // add output to parent
-      _addFrameOutput(state, parent, property, output);
     }
+
+    // handle defaults
+    var props = Object.keys(frame).sort();
+    for(var i = 0; i < props.length; ++i) {
+      var prop = props[i];
+
+      // skip keywords
+      if(_isKeyword(prop)) {
+        continue;
+      }
+
+      // if omit default is off, then include default values for properties
+      // that appear in the next frame but are not in the matching subject
+      var next = frame[prop][0];
+      var omitDefaultOn = _getFrameFlag(next, options, 'omitDefault');
+      if(!omitDefaultOn && !(prop in output)) {
+        var preserve = '@null';
+        if('@default' in next) {
+          preserve = _clone(next['@default']);
+        }
+        if(!_isArray(preserve)) {
+          preserve = [preserve];
+        }
+        output[prop] = [{'@preserve': preserve}];
+      }
+    }
+
+    // add output to parent
+    _addFrameOutput(state, parent, property, output);
   }
 }
 
@@ -3723,16 +4180,17 @@ function _validateFrame(state, frame) {
  * @param state the current framing state.
  * @param subjects the set of subjects to filter.
  * @param frame the parsed frame.
+ * @param flags the frame flags.
  *
  * @return all of the matched subjects.
  */
-function _filterSubjects(state, subjects, frame) {
+function _filterSubjects(state, subjects, frame, flags) {
   // filter subjects in @id order
   var rval = {};
-  for(var i in subjects) {
+  for(var i = 0; i < subjects.length; ++i) {
     var id = subjects[i];
     var subject = state.subjects[id];
-    if(_filterSubject(subject, frame)) {
+    if(_filterSubject(subject, frame, flags)) {
       rval[id] = subject;
     }
   }
@@ -3744,15 +4202,16 @@ function _filterSubjects(state, subjects, frame) {
  *
  * @param subject the subject to check.
  * @param frame the frame to check.
+ * @param flags the frame flags.
  *
  * @return true if the subject matches, false if not.
  */
-function _filterSubject(subject, frame) {
+function _filterSubject(subject, frame, flags) {
   // check @type (object value means 'any' type, fall through to ducktyping)
   if('@type' in frame &&
     !(frame['@type'].length === 1 && _isObject(frame['@type'][0]))) {
     var types = frame['@type'];
-    for(var i in types) {
+    for(var i = 0; i < types.length; ++i) {
       // any matching @type is a match
       if(jsonld.hasValue(subject, '@type', types[i])) {
         return true;
@@ -3762,13 +4221,48 @@ function _filterSubject(subject, frame) {
   }
 
   // check ducktype
+  var wildcard = true;
+  var matchesSome = false;
   for(var key in frame) {
-    // only not a duck if @id or non-keyword isn't in subject
-    if((key === '@id' || !_isKeyword(key)) && !(key in subject)) {
+    if(_isKeyword(key)) {
+      // skip non-@id and non-@type
+      if(key !== '@id' && key !== '@type') {
+        continue;
+      }
+      wildcard = false;
+
+      // check @id for a specific @id value
+      if(key === '@id' && _isString(frame[key])) {
+        if(subject[key] !== frame[key]) {
+          return false;
+        }
+        matchesSome = true;
+        continue;
+      }
+    }
+
+    wildcard = false;
+
+    if(key in subject) {
+      // frame[key] === [] means do not match if property is present
+      if(_isArray(frame[key]) && frame[key].length === 0 &&
+        subject[key] !== undefined) {
+        return false;
+      }
+      matchesSome = true;
+      continue;
+    }
+
+    // all properties must match to be a duck unless a @default is specified
+    var hasDefault = (_isArray(frame[key]) && _isObject(frame[key][0]) &&
+      '@default' in frame[key][0]);
+    if(flags.requireAll && !hasDefault) {
       return false;
     }
   }
-  return true;
+
+  // return true if wildcard or subject matches some properties
+  return wildcard || matchesSome;
 }
 
 /**
@@ -3783,7 +4277,7 @@ function _filterSubject(subject, frame) {
 function _embedValues(state, subject, property, output) {
   // embed subject properties in output
   var objects = subject[property];
-  for(var i in objects) {
+  for(var i = 0; i < objects.length; ++i) {
     var o = objects[i];
 
     // recurse into @list
@@ -3816,9 +4310,8 @@ function _embedValues(state, subject, property, output) {
         }
       }
       _addFrameOutput(state, output, property, o);
-    }
-    // copy non-subject value
-    else {
+    } else {
+      // copy non-subject value
       _addFrameOutput(state, output, property, _clone(o));
     }
   }
@@ -3843,14 +4336,13 @@ function _removeEmbed(state, id) {
   // remove existing embed
   if(_isArray(parent)) {
     // replace subject with reference
-    for(var i in parent) {
+    for(var i = 0; i < parent.length; ++i) {
       if(jsonld.compareValues(parent[i], subject)) {
         parent[i] = subject;
         break;
       }
     }
-  }
-  else {
+  } else {
     // replace subject with reference
     var useArray = _isArray(parent[property]);
     jsonld.removeValue(parent, property, subject, {propertyIsArray: useArray});
@@ -3861,7 +4353,7 @@ function _removeEmbed(state, id) {
   var removeDependents = function(id) {
     // get embed keys as a separate array to enable deleting keys in map
     var ids = Object.keys(embeds);
-    for(var i in ids) {
+    for(var i = 0; i < ids.length; ++i) {
       var next = ids[i];
       if(next in embeds && _isObject(embeds[next].parent) &&
         embeds[next].parent['@id'] === id) {
@@ -3884,8 +4376,7 @@ function _removeEmbed(state, id) {
 function _addFrameOutput(state, parent, property, output) {
   if(_isObject(parent)) {
     jsonld.addValue(parent, property, output, {propertyIsArray: true});
-  }
-  else {
+  } else {
     parent.push(output);
   }
 }
@@ -3903,7 +4394,7 @@ function _removePreserve(ctx, input, options) {
   // recurse through arrays
   if(_isArray(input)) {
     var output = [];
-    for(var i in input) {
+    for(var i = 0; i < input.length; ++i) {
       var result = _removePreserve(ctx, input[i], options);
       // drop nulls from arrays
       if(result !== null) {
@@ -3911,8 +4402,7 @@ function _removePreserve(ctx, input, options) {
       }
     }
     input = output;
-  }
-  else if(_isObject(input)) {
+  } else if(_isObject(input)) {
     // remove @preserve
     if('@preserve' in input) {
       if(input['@preserve'] === '@null') {
@@ -3958,10 +4448,10 @@ function _compareShortestLeast(a, b) {
   if(a.length < b.length) {
     return -1;
   }
-  else if(b.length < a.length) {
+  if(b.length < a.length) {
     return 1;
   }
-  else if(a === b) {
+  if(a === b) {
     return 0;
   }
   return (a < b) ? -1 : 1;
@@ -4002,13 +4492,11 @@ function _selectTerm(
       activeCtx.mappings[term]['@id'] === value['@id']) {
       // prefer @vocab
       prefs.push.apply(prefs, ['@vocab', '@id']);
-    }
-    else {
+    } else {
       // prefer @id
       prefs.push.apply(prefs, ['@id', '@vocab']);
     }
-  }
-  else {
+  } else {
     prefs.push(typeOrLanguageValue);
   }
   prefs.push('@none');
@@ -4089,9 +4577,8 @@ function _compactIri(activeCtx, iri, value, relativeTo, reverse) {
       typeOrLanguage = '@type';
       typeOrLanguageValue = '@reverse';
       containers.push('@set');
-    }
-    // choose the most specific term that works for all elements in @list
-    else if(_isList(value)) {
+    } else if(_isList(value)) {
+      // choose the most specific term that works for all elements in @list
       // only select @list containers if @index is NOT in value
       if(!('@index' in value)) {
         containers.push('@list');
@@ -4106,28 +4593,23 @@ function _compactIri(activeCtx, iri, value, relativeTo, reverse) {
         if(_isValue(item)) {
           if('@language' in item) {
             itemLanguage = item['@language'];
-          }
-          else if('@type' in item) {
+          } else if('@type' in item) {
             itemType = item['@type'];
-          }
-          // plain literal
-          else {
+          } else {
+            // plain literal
             itemLanguage = '@null';
           }
-        }
-        else {
+        } else {
           itemType = '@id';
         }
         if(commonLanguage === null) {
           commonLanguage = itemLanguage;
-        }
-        else if(itemLanguage !== commonLanguage && _isValue(item)) {
+        } else if(itemLanguage !== commonLanguage && _isValue(item)) {
           commonLanguage = '@none';
         }
         if(commonType === null) {
           commonType = itemType;
-        }
-        else if(itemType !== commonType) {
+        } else if(itemType !== commonType) {
           commonType = '@none';
         }
         // there are different languages and types in the list, so choose
@@ -4141,23 +4623,19 @@ function _compactIri(activeCtx, iri, value, relativeTo, reverse) {
       if(commonType !== '@none') {
         typeOrLanguage = '@type';
         typeOrLanguageValue = commonType;
-      }
-      else {
+      } else {
         typeOrLanguageValue = commonLanguage;
       }
-    }
-    else {
+    } else {
       if(_isValue(value)) {
         if('@language' in value && !('@index' in value)) {
           containers.push('@language');
           typeOrLanguageValue = value['@language'];
-        }
-        else if('@type' in value) {
+        } else if('@type' in value) {
           typeOrLanguage = '@type';
           typeOrLanguageValue = value['@type'];
         }
-      }
-      else {
+      } else {
         typeOrLanguage = '@type';
         typeOrLanguageValue = '@id';
       }
@@ -4288,13 +4766,12 @@ function _compactValue(activeCtx, activeProperty, value) {
       rval[_compactIri(activeCtx, '@index')] = value['@index'];
     }
 
-    // compact @type IRI
     if('@type' in value) {
+      // compact @type IRI
       rval[_compactIri(activeCtx, '@type')] = _compactIri(
         activeCtx, value['@type'], null, {vocab: true});
-    }
-    // alias @language
-    else if('@language' in value) {
+    } else if('@language' in value) {
+      // alias @language
       rval[_compactIri(activeCtx, '@language')] = value['@language'];
     }
 
@@ -4338,7 +4815,8 @@ function _createTermDefinition(activeCtx, localCtx, term, defined) {
     // cycle detected
     throw new JsonLdError(
       'Cyclical context definition detected.',
-      'jsonld.CyclicalContext', {context: localCtx, term: term});
+      'jsonld.CyclicalContext',
+      {code: 'cyclic IRI mapping', context: localCtx, term: term});
   }
 
   // now defining term
@@ -4347,7 +4825,15 @@ function _createTermDefinition(activeCtx, localCtx, term, defined) {
   if(_isKeyword(term)) {
     throw new JsonLdError(
       'Invalid JSON-LD syntax; keywords cannot be overridden.',
-      'jsonld.SyntaxError', {context: localCtx});
+      'jsonld.SyntaxError',
+      {code: 'keyword redefinition', context: localCtx, term: term});
+  }
+
+  if(term === '') {
+    throw new JsonLdError(
+      'Invalid JSON-LD syntax; a term cannot be an empty string.',
+      'jsonld.SyntaxError',
+      {code: 'invalid term definition', context: localCtx});
   }
 
   // remove old mapping
@@ -4374,7 +4860,8 @@ function _createTermDefinition(activeCtx, localCtx, term, defined) {
     throw new JsonLdError(
       'Invalid JSON-LD syntax; @context property values must be ' +
       'strings or objects.',
-      'jsonld.SyntaxError', {context: localCtx});
+      'jsonld.SyntaxError',
+      {code: 'invalid term definition', context: localCtx});
   }
 
   // create new mapping
@@ -4382,37 +4869,50 @@ function _createTermDefinition(activeCtx, localCtx, term, defined) {
   mapping.reverse = false;
 
   if('@reverse' in value) {
-    if('@id' in value || '@type' in value || '@language' in value) {
+    if('@id' in value) {
       throw new JsonLdError(
         'Invalid JSON-LD syntax; a @reverse term definition must not ' +
-        'contain @id, @type, or @language.',
-        'jsonld.SyntaxError', {context: localCtx});
+        'contain @id.', 'jsonld.SyntaxError',
+        {code: 'invalid reverse property', context: localCtx});
     }
     var reverse = value['@reverse'];
     if(!_isString(reverse)) {
       throw new JsonLdError(
         'Invalid JSON-LD syntax; a @context @reverse value must be a string.',
-        'jsonld.SyntaxError', {context: localCtx});
+        'jsonld.SyntaxError', {code: 'invalid IRI mapping', context: localCtx});
     }
 
-    // expand and add @id mapping, set @type to @id
-    mapping['@id'] = _expandIri(
+    // expand and add @id mapping
+    var id = _expandIri(
       activeCtx, reverse, {vocab: true, base: false}, localCtx, defined);
-    mapping['@type'] = '@id';
+    if(!_isAbsoluteIri(id)) {
+      throw new JsonLdError(
+        'Invalid JSON-LD syntax; a @context @reverse value must be an ' +
+        'absolute IRI or a blank node identifier.',
+        'jsonld.SyntaxError', {code: 'invalid IRI mapping', context: localCtx});
+    }
+    mapping['@id'] = id;
     mapping.reverse = true;
-  }
-  else if('@id' in value) {
+  } else if('@id' in value) {
     var id = value['@id'];
     if(!_isString(id)) {
       throw new JsonLdError(
         'Invalid JSON-LD syntax; a @context @id value must be an array ' +
         'of strings or a string.',
-        'jsonld.SyntaxError', {context: localCtx});
+        'jsonld.SyntaxError', {code: 'invalid IRI mapping', context: localCtx});
     }
     if(id !== term) {
       // expand and add @id mapping
-      mapping['@id'] = _expandIri(
+      id = _expandIri(
         activeCtx, id, {vocab: true, base: false}, localCtx, defined);
+      if(!_isAbsoluteIri(id) && !_isKeyword(id)) {
+        throw new JsonLdError(
+          'Invalid JSON-LD syntax; a @context @id value must be an ' +
+          'absolute IRI, a blank node identifier, or a keyword.',
+          'jsonld.SyntaxError',
+          {code: 'invalid IRI mapping', context: localCtx});
+      }
+      mapping['@id'] = id;
     }
   }
 
@@ -4426,22 +4926,21 @@ function _createTermDefinition(activeCtx, localCtx, term, defined) {
         _createTermDefinition(activeCtx, localCtx, prefix, defined);
       }
 
-      // set @id based on prefix parent
       if(activeCtx.mappings[prefix]) {
+        // set @id based on prefix parent
         var suffix = term.substr(colon + 1);
         mapping['@id'] = activeCtx.mappings[prefix]['@id'] + suffix;
-      }
-      // term is an absolute IRI
-      else {
+      } else {
+        // term is an absolute IRI
         mapping['@id'] = term;
       }
-    }
-    else {
+    } else {
       // non-IRIs *must* define @ids if @vocab is not available
       if(!('@vocab' in activeCtx)) {
         throw new JsonLdError(
           'Invalid JSON-LD syntax; @context terms must define an @id.',
-          'jsonld.SyntaxError', {context: localCtx, term: term});
+          'jsonld.SyntaxError',
+          {code: 'invalid IRI mapping', context: localCtx, term: term});
       }
       // prepend vocab to term
       mapping['@id'] = activeCtx['@vocab'] + term;
@@ -4455,14 +4954,29 @@ function _createTermDefinition(activeCtx, localCtx, term, defined) {
     var type = value['@type'];
     if(!_isString(type)) {
       throw new JsonLdError(
-        'Invalid JSON-LD syntax; @context @type values must be strings.',
-        'jsonld.SyntaxError', {context: localCtx});
+        'Invalid JSON-LD syntax; an @context @type values must be a string.',
+        'jsonld.SyntaxError',
+        {code: 'invalid type mapping', context: localCtx});
     }
 
-    if(type !== '@id') {
+    if(type !== '@id' && type !== '@vocab') {
       // expand @type to full IRI
       type = _expandIri(
-        activeCtx, type, {vocab: true, base: true}, localCtx, defined);
+        activeCtx, type, {vocab: true, base: false}, localCtx, defined);
+      if(!_isAbsoluteIri(type)) {
+        throw new JsonLdError(
+          'Invalid JSON-LD syntax; an @context @type value must be an ' +
+          'absolute IRI.',
+          'jsonld.SyntaxError',
+          {code: 'invalid type mapping', context: localCtx});
+      }
+      if(type.indexOf('_:') === 0) {
+        throw new JsonLdError(
+          'Invalid JSON-LD syntax; an @context @type values must be an IRI, ' +
+          'not a blank node identifier.',
+          'jsonld.SyntaxError',
+          {code: 'invalid type mapping', context: localCtx});
+      }
     }
 
     // add @type to mapping
@@ -4476,13 +4990,15 @@ function _createTermDefinition(activeCtx, localCtx, term, defined) {
       throw new JsonLdError(
         'Invalid JSON-LD syntax; @context @container value must be ' +
         'one of the following: @list, @set, @index, or @language.',
-        'jsonld.SyntaxError', {context: localCtx});
+        'jsonld.SyntaxError',
+        {code: 'invalid container mapping', context: localCtx});
     }
-    if(mapping.reverse && container !== '@index') {
+    if(mapping.reverse && container !== '@index' && container !== '@set' &&
+      container !== null) {
       throw new JsonLdError(
         'Invalid JSON-LD syntax; @context @container value for a @reverse ' +
-        'type definition must be @index.',
-        'jsonld.SyntaxError', {context: localCtx});
+        'type definition must be @index or @set.', 'jsonld.SyntaxError',
+        {code: 'invalid reverse property', context: localCtx});
     }
 
     // add @container to mapping
@@ -4494,8 +5010,8 @@ function _createTermDefinition(activeCtx, localCtx, term, defined) {
     if(language !== null && !_isString(language)) {
       throw new JsonLdError(
         'Invalid JSON-LD syntax; @context @language value must be ' +
-        'a string or null.',
-        'jsonld.SyntaxError', {context: localCtx});
+        'a string or null.', 'jsonld.SyntaxError',
+        {code: 'invalid language mapping', context: localCtx});
     }
 
     // add @language to mapping
@@ -4510,7 +5026,7 @@ function _createTermDefinition(activeCtx, localCtx, term, defined) {
   if(id === '@context' || id === '@preserve') {
     throw new JsonLdError(
       'Invalid JSON-LD syntax; @context and @preserve cannot be aliased.',
-      'jsonld.SyntaxError');
+      'jsonld.SyntaxError', {code: 'invalid keyword alias', context: localCtx});
   }
 }
 
@@ -4595,16 +5111,6 @@ function _expandIri(activeCtx, value, relativeTo, localCtx, defined) {
     rval = _prependBase(activeCtx['@base'], rval);
   }
 
-  if(localCtx) {
-    // value must now be an absolute IRI
-    if(!_isAbsoluteIri(rval)) {
-      throw new JsonLdError(
-        'Invalid JSON-LD syntax; a @context value does not expand to ' +
-        'an absolute IRI.',
-        'jsonld.SyntaxError', {context: localCtx, value: value});
-    }
-  }
-
   return rval;
 }
 
@@ -4617,6 +5123,10 @@ function _expandIri(activeCtx, value, relativeTo, localCtx, defined) {
  * @return the absolute IRI.
  */
 function _prependBase(base, iri) {
+  // skip IRI processing
+  if(base === null) {
+    return iri;
+  }
   // already an absolute IRI
   if(iri.indexOf(':') !== -1) {
     return iri;
@@ -4634,8 +5144,7 @@ function _prependBase(base, iri) {
   var hierPart = (base.protocol || '');
   if(rel.authority) {
     hierPart += '//' + rel.authority;
-  }
-  else if(base.href !== '') {
+  } else if(base.href !== '') {
     hierPart += '//' + base.authority;
   }
 
@@ -4645,8 +5154,7 @@ function _prependBase(base, iri) {
   // IRI represents an absolute path
   if(rel.pathname.indexOf('/') === 0) {
     path = rel.pathname;
-  }
-  else {
+  } else {
     path = base.pathname;
 
     // append relative path to the end of the last directory from base
@@ -4688,6 +5196,11 @@ function _prependBase(base, iri) {
  * @return the relative IRI if relative to base, otherwise the absolute IRI.
  */
 function _removeBase(base, iri) {
+  // skip IRI processing
+  if(base === null) {
+    return iri;
+  }
+
   if(_isString(base)) {
     base = jsonld.url.parse(base || '');
   }
@@ -4696,9 +5209,8 @@ function _removeBase(base, iri) {
   var root = '';
   if(base.href !== '') {
     root += (base.protocol || '') + '//' + base.authority;
-  }
-  // support network-path reference with empty base
-  else if(iri.indexOf('//')) {
+  } else if(iri.indexOf('//')) {
+    // support network-path reference with empty base
     root += '//';
   }
 
@@ -4710,11 +5222,12 @@ function _removeBase(base, iri) {
   // remove root from IRI and parse remainder
   var rel = jsonld.url.parse(iri.substr(root.length));
 
-  // remove path segments that match
+  // remove path segments that match (do not remove last segment unless there
+  // is a hash or query)
   var baseSegments = base.normalizedPath.split('/');
   var iriSegments = rel.normalizedPath.split('/');
-
-  while(baseSegments.length > 0 && iriSegments.length > 0) {
+  var last = (rel.hash || rel.query) ? 0 : 1;
+  while(baseSegments.length > 0 && iriSegments.length > last) {
     if(baseSegments[0] !== iriSegments[0]) {
       break;
     }
@@ -4725,11 +5238,9 @@ function _removeBase(base, iri) {
   // use '../' for each non-matching base segment
   var rval = '';
   if(baseSegments.length > 0) {
-    // don't count the last segment if it isn't a path (doesn't end in '/')
-    // don't count empty first segment, it means base began with '/'
-    if(base.normalizedPath.substr(-1) !== '/' || baseSegments[0] === '') {
-      baseSegments.pop();
-    }
+    // don't count the last segment (if it ends with '/' last path doesn't
+    // count and if it doesn't end with '/' it isn't a path)
+    baseSegments.pop();
     for(var i = 0; i < baseSegments.length; ++i) {
       rval += '../';
     }
@@ -4825,22 +5336,19 @@ function _getInitialContext(options) {
         }
         entry = entry[container];
 
-        // term is preferred for values using @reverse
         if(mapping.reverse) {
+          // term is preferred for values using @reverse
           _addPreferredTerm(mapping, term, entry['@type'], '@reverse');
-        }
-        // term is preferred for values using specific type
-        else if('@type' in mapping) {
+        } else if('@type' in mapping) {
+          // term is preferred for values using specific type
           _addPreferredTerm(mapping, term, entry['@type'], mapping['@type']);
-        }
-        // term is preferred for values using specific language
-        else if('@language' in mapping) {
+        } else if('@language' in mapping) {
+          // term is preferred for values using specific language
           var language = mapping['@language'] || '@null';
           _addPreferredTerm(mapping, term, entry['@language'], language);
-        }
-        // term is preferred for values w/default language or no type and
-        // no language
-        else {
+        } else {
+          // term is preferred for values w/default language or no type and
+          // no language
           // add an entry for the default language
           _addPreferredTerm(mapping, term, entry['@language'], defaultLanguage);
 
@@ -4915,6 +5423,7 @@ function _isKeyword(v) {
   case '@list':
   case '@omitDefault':
   case '@preserve':
+  case '@requireAll':
   case '@reverse':
   case '@set':
   case '@type':
@@ -4974,7 +5483,7 @@ function _validateTypeValue(v) {
   if(_isArray(v)) {
     // must contain only strings
     isValid = true;
-    for(var i in v) {
+    for(var i = 0; i < v.length; ++i) {
       if(!(_isString(v[i]))) {
         isValid = false;
         break;
@@ -4985,7 +5494,8 @@ function _validateTypeValue(v) {
   if(!isValid) {
     throw new JsonLdError(
       'Invalid JSON-LD syntax; "@type" value must a string, an array of ' +
-      'strings, or an empty object.', 'jsonld.SyntaxError', {value: v});
+      'strings, or an empty object.', 'jsonld.SyntaxError',
+      {code: 'invalid type value', value: v});
   }
 }
 
@@ -5137,8 +5647,7 @@ function _isBlankNode(v) {
   if(_isObject(v)) {
     if('@id' in v) {
       rval = (v['@id'].indexOf('_:') === 0);
-    }
-    else {
+    } else {
       rval = (Object.keys(v).length === 0 ||
         !(('@value' in v) || ('@set' in v) || ('@list' in v)));
     }
@@ -5158,7 +5667,8 @@ function _isAbsoluteIri(v) {
 }
 
 /**
- * Clones an object, array, or string/number.
+ * Clones an object, array, or string/number. If a typed JavaScript object
+ * is given, such as a Date, it will be converted to a string.
  *
  * @param value the value to clone.
  *
@@ -5166,9 +5676,19 @@ function _isAbsoluteIri(v) {
  */
 function _clone(value) {
   if(value && typeof value === 'object') {
-    var rval = _isArray(value) ? [] : {};
-    for(var i in value) {
-      rval[i] = _clone(value[i]);
+    var rval;
+    if(_isArray(value)) {
+      rval = [];
+      for(var i = 0; i < value.length; ++i) {
+        rval[i] = _clone(value[i]);
+      }
+    } else if(_isObject(value)) {
+      rval = {};
+      for(var key in value) {
+        rval[key] = _clone(value[key]);
+      }
+    } else {
+      rval = value.toString();
     }
     return rval;
   }
@@ -5189,12 +5709,11 @@ function _clone(value) {
 function _findContextUrls(input, urls, replace, base) {
   var count = Object.keys(urls).length;
   if(_isArray(input)) {
-    for(var i in input) {
+    for(var i = 0; i < input.length; ++i) {
       _findContextUrls(input[i], urls, replace, base);
     }
     return (count < Object.keys(urls).length);
-  }
-  else if(_isObject(input)) {
+  } else if(_isObject(input)) {
     for(var key in input) {
       if(key !== '@context') {
         _findContextUrls(input[key], urls, replace, base);
@@ -5219,27 +5738,23 @@ function _findContextUrls(input, urls, replace, base) {
                 Array.prototype.splice.apply(ctx, [i, 1].concat(_ctx));
                 i += _ctx.length;
                 length += _ctx.length;
-              }
-              else {
+              } else {
                 ctx[i] = _ctx;
               }
-            }
-            // @context URL found
-            else if(!(_ctx in urls)) {
+            } else if(!(_ctx in urls)) {
+              // @context URL found
               urls[_ctx] = false;
             }
           }
         }
-      }
-      // string @context
-      else if(_isString(ctx)) {
+      } else if(_isString(ctx)) {
+        // string @context
         ctx = _prependBase(base, ctx);
         // replace w/@context if requested
         if(replace) {
           input[key] = urls[ctx];
-        }
-        // @context URL found
-        else if(!(ctx in urls)) {
+        } else if(!(ctx in urls)) {
+          // @context URL found
           urls[ctx] = false;
         }
       }
@@ -5250,27 +5765,27 @@ function _findContextUrls(input, urls, replace, base) {
 }
 
 /**
- * Retrieves external @context URLs using the given context loader. Every
+ * Retrieves external @context URLs using the given document loader. Every
  * instance of @context in the input that refers to a URL will be replaced
  * with the JSON @context found at that URL.
  *
  * @param input the JSON-LD input with possible contexts.
  * @param options the options to use:
- *          loadContext(url, callback(err, url, result)) the context loader.
+ *          documentLoader(url, callback(err, remoteDoc)) the document loader.
  * @param callback(err, input) called once the operation completes.
  */
 function _retrieveContextUrls(input, options, callback) {
   // if any error occurs during URL resolution, quit
   var error = null;
-  var regex = /(http|https):\/\/(\w+:{0,1}\w*@)?(\S+)(:[0-9]+)?(\/|\/([\w#!:.?+=&%@!\-\/]))?/;
 
-  // recursive context loader
-  var loadContext = options.loadContext;
-  var retrieve = function(input, cycles, loadContext, base, callback) {
+  // recursive document loader
+  var documentLoader = options.documentLoader;
+  var retrieve = function(input, cycles, documentLoader, base, callback) {
     if(Object.keys(cycles).length > MAX_CONTEXT_URLS) {
       error = new JsonLdError(
         'Maximum number of @context URLs exceeded.',
-        'jsonld.ContextUrlError', {max: MAX_CONTEXT_URLS});
+        'jsonld.ContextUrlError',
+        {code: 'loading remote context failed', max: MAX_CONTEXT_URLS});
       return callback(error);
     }
 
@@ -5294,42 +5809,37 @@ function _retrieveContextUrls(input, options, callback) {
     var queue = [];
     for(var url in urls) {
       if(urls[url] === false) {
-        // validate URL
-        if(!regex.test(url)) {
-          error = new JsonLdError(
-            'Malformed URL.', 'jsonld.InvalidUrl', {url: url});
-          return callback(error);
-        }
         queue.push(url);
       }
     }
 
     // retrieve URLs in queue
     var count = queue.length;
-    for(var i in queue) {
+    for(var i = 0; i < queue.length; ++i) {
       (function(url) {
         // check for context URL cycle
         if(url in cycles) {
           error = new JsonLdError(
             'Cyclical @context URLs detected.',
-            'jsonld.ContextUrlError', {url: url});
+            'jsonld.ContextUrlError',
+            {code: 'recursive context inclusion', url: url});
           return callback(error);
         }
         var _cycles = _clone(cycles);
         _cycles[url] = true;
-
-        loadContext(url, function(err, finalUrl, ctx) {
+        var done = function(err, remoteDoc) {
           // short-circuit if there was an error with another URL
           if(error) {
             return;
           }
 
+          var ctx = remoteDoc ? remoteDoc.document : null;
+
           // parse string context as JSON
           if(!err && _isString(ctx)) {
             try {
               ctx = JSON.parse(ctx);
-            }
-            catch(ex) {
+            } catch(ex) {
               err = ex;
             }
           }
@@ -5337,18 +5847,20 @@ function _retrieveContextUrls(input, options, callback) {
           // ensure ctx is an object
           if(err) {
             err = new JsonLdError(
-              'Derefencing a URL did not result in a valid JSON-LD object. ' +
+              'Dereferencing a URL did not result in a valid JSON-LD object. ' +
               'Possible causes are an inaccessible URL perhaps due to ' +
               'a same-origin policy (ensure the server uses CORS if you are ' +
-              'using client-side JavaScript), too many redirects, or a ' +
-              'non-JSON response.',
-              'jsonld.InvalidUrl', {url: url, cause: err});
-          }
-          else if(!_isObject(ctx)) {
+              'using client-side JavaScript), too many redirects, a ' +
+              'non-JSON response, or more than one HTTP Link Header was ' +
+              'provided for a remote context.',
+              'jsonld.InvalidUrl',
+              {code: 'loading remote context failed', url: url, cause: err});
+          } else if(!_isObject(ctx)) {
             err = new JsonLdError(
-              'Derefencing a URL did not result in a JSON object. The ' +
+              'Dereferencing a URL did not result in a JSON object. The ' +
               'response was valid JSON, but it was not a JSON object.',
-              'jsonld.InvalidUrl', {url: url, cause: err});
+              'jsonld.InvalidUrl',
+              {code: 'invalid remote context', url: url, cause: err});
           }
           if(err) {
             error = err;
@@ -5358,10 +5870,20 @@ function _retrieveContextUrls(input, options, callback) {
           // use empty context if no @context key is present
           if(!('@context' in ctx)) {
             ctx = {'@context': {}};
+          } else {
+            ctx = {'@context': ctx['@context']};
+          }
+
+          // append context URL to context if given
+          if(remoteDoc.contextUrl) {
+            if(!_isArray(ctx['@context'])) {
+              ctx['@context'] = [ctx['@context']];
+            }
+            ctx['@context'].push(remoteDoc.contextUrl);
           }
 
           // recurse
-          retrieve(ctx, _cycles, loadContext, url, function(err, ctx) {
+          retrieve(ctx, _cycles, documentLoader, url, function(err, ctx) {
             if(err) {
               return callback(err);
             }
@@ -5371,11 +5893,15 @@ function _retrieveContextUrls(input, options, callback) {
               finished();
             }
           });
-        });
+        };
+        var promise = documentLoader(url, done);
+        if(promise && 'then' in promise) {
+          promise.then(done.bind(null, null), done);
+        }
       }(queue[i]));
     }
   };
-  retrieve(input, {}, loadContext, options.base, callback);
+  retrieve(input, {}, documentLoader, options.base, callback);
 }
 
 // define js 1.8.5 Object.keys method if not present
@@ -5404,7 +5930,7 @@ if(!Object.keys) {
 function _parseNQuads(input) {
   // define partial regexes
   var iri = '(?:<([^:]+:[^>]*)>)';
-  var bnode = '(_:(?:[A-Za-z][A-Za-z0-9]*))';
+  var bnode = '(_:(?:[A-Za-z0-9]+))';
   var plain = '"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"';
   var datatype = '(?:\\^\\^' + iri + ')';
   var language = '(?:@([a-z]+(?:-[a-z0-9]+)*))';
@@ -5453,8 +5979,7 @@ function _parseNQuads(input) {
     // get subject
     if(!_isUndefined(match[1])) {
       triple.subject = {type: 'IRI', value: match[1]};
-    }
-    else {
+    } else {
       triple.subject = {type: 'blank node', value: match[2]};
     }
 
@@ -5464,20 +5989,16 @@ function _parseNQuads(input) {
     // get object
     if(!_isUndefined(match[4])) {
       triple.object = {type: 'IRI', value: match[4]};
-    }
-    else if(!_isUndefined(match[5])) {
+    } else if(!_isUndefined(match[5])) {
       triple.object = {type: 'blank node', value: match[5]};
-    }
-    else {
+    } else {
       triple.object = {type: 'literal'};
       if(!_isUndefined(match[7])) {
         triple.object.datatype = match[7];
-      }
-      else if(!_isUndefined(match[8])) {
+      } else if(!_isUndefined(match[8])) {
         triple.object.datatype = RDF_LANGSTRING;
         triple.object.language = match[8];
-      }
-      else {
+      } else {
         triple.object.datatype = XSD_STRING;
       }
       var unescaped = match[6]
@@ -5493,17 +6014,15 @@ function _parseNQuads(input) {
     var name = '@default';
     if(!_isUndefined(match[9])) {
       name = match[9];
-    }
-    else if(!_isUndefined(match[10])) {
+    } else if(!_isUndefined(match[10])) {
       name = match[10];
     }
 
     // initialize graph in dataset
     if(!(name in dataset)) {
       dataset[name] = [triple];
-    }
-    // add triple if unique to its graph
-    else {
+    } else {
+      // add triple if unique to its graph
       var unique = true;
       var triples = dataset[name];
       for(var ti = 0; unique && ti < triples.length; ++ti) {
@@ -5565,37 +6084,43 @@ function _toNQuad(triple, graphName, bnode) {
 
   var quad = '';
 
-  // subject is an IRI or bnode
+  // subject is an IRI
   if(s.type === 'IRI') {
     quad += '<' + s.value + '>';
-  }
-  // normalization mode
-  else if(bnode) {
+  } else if(bnode) {
+    // bnode normalization mode
     quad += (s.value === bnode) ? '_:a' : '_:z';
-  }
-  // normal mode
-  else {
+  } else {
+    // bnode normal mode
     quad += s.value;
   }
+  quad += ' ';
 
-  // predicate is always an IRI
-  quad += ' <' + p.value + '> ';
+  // predicate is an IRI
+  if(p.type === 'IRI') {
+    quad += '<' + p.value + '>';
+  } else if(bnode) {
+    // FIXME: TBD what to do with bnode predicates during normalization
+    // bnode normalization mode
+    quad += '_:p';
+  } else {
+    // bnode normal mode
+    quad += p.value;
+  }
+  quad += ' ';
 
   // object is IRI, bnode, or literal
   if(o.type === 'IRI') {
     quad += '<' + o.value + '>';
-  }
-  else if(o.type === 'blank node') {
+  } else if(o.type === 'blank node') {
     // normalization mode
     if(bnode) {
       quad += (o.value === bnode) ? '_:a' : '_:z';
-    }
-    // normal mode
-    else {
+    } else {
+      // normal mode
       quad += o.value;
     }
-  }
-  else {
+  } else {
     var escaped = o.value
       .replace(/\\/g, '\\\\')
       .replace(/\t/g, '\\t')
@@ -5604,9 +6129,10 @@ function _toNQuad(triple, graphName, bnode) {
       .replace(/\"/g, '\\"');
     quad += '"' + escaped + '"';
     if(o.datatype === RDF_LANGSTRING) {
-      quad += '@' + o.language;
-    }
-    else if(o.datatype !== XSD_STRING) {
+      if(o.language) {
+        quad += '@' + o.language;
+      }
+    } else if(o.datatype !== XSD_STRING) {
       quad += '^^<' + o.datatype + '>';
     }
   }
@@ -5615,11 +6141,9 @@ function _toNQuad(triple, graphName, bnode) {
   if(g !== null) {
     if(g.indexOf('_:') !== 0) {
       quad += ' <' + g + '>';
-    }
-    else if(bnode) {
+    } else if(bnode) {
       quad += ' _:g';
-    }
-    else {
+    } else {
       quad += ' ' + g;
     }
   }
@@ -5664,13 +6188,16 @@ function _parseRdfaApiData(data) {
         // add subject
         if(subject.indexOf('_:') === 0) {
           triple.subject = {type: 'blank node', value: subject};
-        }
-        else {
+        } else {
           triple.subject = {type: 'IRI', value: subject};
         }
 
         // add predicate
-        triple.predicate = {type: 'IRI', value: predicate};
+        if(predicate.indexOf('_:') === 0) {
+          triple.predicate = {type: 'blank node', value: predicate};
+        } else {
+          triple.predicate = {type: 'IRI', value: predicate};
+        }
 
         // serialize XML literal
         var value = object.value;
@@ -5684,8 +6211,7 @@ function _parseRdfaApiData(data) {
           for(var x = 0; x < object.value.length; x++) {
             if(object.value[x].nodeType === Node.ELEMENT_NODE) {
               value += serializer.serializeToString(object.value[x]);
-            }
-            else if(object.value[x].nodeType === Node.TEXT_NODE) {
+            } else if(object.value[x].nodeType === Node.TEXT_NODE) {
               value += object.value[x].nodeValue;
             }
           }
@@ -5698,24 +6224,20 @@ function _parseRdfaApiData(data) {
         if(object.type === RDF_OBJECT) {
           if(object.value.indexOf('_:') === 0) {
             triple.object.type = 'blank node';
-          }
-          else {
+          } else {
             triple.object.type = 'IRI';
           }
-        }
-        // literal
-        else {
+        } else {
+          // object is a literal
           triple.object.type = 'literal';
           if(object.type === RDF_PLAIN_LITERAL) {
             if(object.language) {
               triple.object.datatype = RDF_LANGSTRING;
               triple.object.language = object.language;
-            }
-            else {
+            } else {
               triple.object.datatype = XSD_STRING;
             }
-          }
-          else {
+          } else {
             triple.object.datatype = object.type;
           }
         }
@@ -5743,7 +6265,7 @@ function UniqueNamer(prefix) {
   this.prefix = prefix;
   this.counter = 0;
   this.existing = {};
-};
+}
 
 /**
  * Copies this UniqueNamer.
@@ -5800,14 +6322,14 @@ UniqueNamer.prototype.isNamed = function(oldName) {
  *
  * @param list the array of elements to iterate over.
  */
-Permutator = function(list) {
+var Permutator = function(list) {
   // original array
   this.list = list.sort();
   // indicates whether there are more permutations
   this.done = false;
   // directional info for permutation algorithm
   this.left = {};
-  for(var i in list) {
+  for(var i = 0; i < list.length; ++i) {
     this.left[list[i]] = true;
   }
 };
@@ -5853,8 +6375,7 @@ Permutator.prototype.next = function() {
   // no more permutations
   if(k === null) {
     this.done = true;
-  }
-  else {
+  } else {
     // swap k and the element it is looking at
     var swap = this.left[k] ? pos - 1 : pos + 1;
     this.list[pos] = this.list[swap];
@@ -5887,8 +6408,7 @@ if(_nodejs) {
       }
     };
   };
-}
-else {
+} else {
   sha1.create = function() {
     return new sha1.MessageDigest();
   };
@@ -5904,7 +6424,7 @@ else {
  */
 sha1.hash = function(nquads) {
   var md = sha1.create();
-  for(var i in nquads) {
+  for(var i = 0; i < nquads.length; ++i) {
     md.update(nquads[i]);
   }
   return md.digest();
@@ -6233,9 +6753,9 @@ _sha1.update = function(s, w, input) {
 
 if(!XMLSerializer) {
 
-function _defineXMLSerializer() {
+var _defineXMLSerializer = function() {
   XMLSerializer = require('xmldom').XMLSerializer;
-}
+};
 
 } // end _defineXMLSerializer
 
@@ -6251,8 +6771,7 @@ if(_nodejs) {
       parsed.pathname, parsed.authority !== '');
     return parsed;
   };
-}
-else {
+} else {
   // parseUri 1.2.2
   // (c) Steven Levithan <stevenlevithan.com>
   // MIT License
@@ -6304,13 +6823,11 @@ function _parseAuthority(parsed) {
     if(idx === -1) {
       parsed.authority = parsed.pathname;
       parsed.pathname = '';
-    }
-    else {
+    } else {
       parsed.authority = parsed.pathname.substr(0, idx);
       parsed.pathname = parsed.pathname.substr(idx);
     }
-  }
-  else {
+  } else {
     // construct authority
     parsed.authority = parsed.host || '';
     if(parsed.auth) {
@@ -6345,9 +6862,8 @@ function _removeDotSegments(path, hasAuthority) {
       if(hasAuthority ||
         (output.length > 0 && output[output.length - 1] !== '..')) {
         output.pop();
-      }
-      // leading relative URL '..'
-      else {
+      } else {
+        // leading relative URL '..'
         output.push('..');
       }
       continue;
@@ -6359,8 +6875,11 @@ function _removeDotSegments(path, hasAuthority) {
 }
 
 if(_nodejs) {
-  // use node context loader by default
-  jsonld.useContextLoader('node');
+  // use node document loader by default
+  jsonld.useDocumentLoader('node');
+} else if(typeof XMLHttpRequest !== 'undefined') {
+  // use xhr document loader by default
+  jsonld.useDocumentLoader('xhr');
 }
 
 if(_nodejs) {
@@ -6393,22 +6912,19 @@ var factory = function() {
 // the shared global jsonld API instance
 wrapper(factory);
 
-// export nodejs API
 if(_nodejs) {
+  // export nodejs API
   module.exports = factory;
-}
-// export AMD API
-else if(typeof define === 'function' && define.amd) {
-  define('jsonld', [], function() {
+} else if(typeof define === 'function' && define.amd) {
+  // export AMD API
+  define([], function() {
     return factory;
   });
-}
-// export simple browser API
-else if(_browser) {
+} else if(_browser) {
+  // export simple browser API
   if(typeof jsonld === 'undefined') {
     jsonld = jsonldjs = factory;
-  }
-  else {
+  } else {
     jsonldjs = factory;
   }
 }
